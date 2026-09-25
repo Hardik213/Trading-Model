@@ -304,6 +304,6 @@ def latest_confirmed_liquidity(
     """
     confirmed = [
         s for s in swings
-        if s.confirmation_timestamp <= as_of
+        if s.confirmation_timestamp < as_of
     ]
     return swings_to_liquidity(confirmed)
