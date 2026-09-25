@@ -1,0 +1,32 @@
+{
+  "symbol": "XAUUSD",
+  "status": "ERROR",
+  "signal": 0,
+  "probability": 0.0,
+  "threshold": 0.55,
+  "session": "UNAVAILABLE",
+  "entry_session": false,
+  "regime_bias": 0.0,
+  "macro_bias": 0.0,
+  "session_bias": 0.0,
+  "liquidity_bias": 0.0,
+  "htf_high": 0.0,
+  "htf_low": 0.0,
+  "price": 0.0,
+  "displacement": 0.0,
+  "rr_ratio": 0.0,
+  "has_meaningful_htf_objective": false,
+  "liquidity_raid_long": false,
+  "liquidity_raid_short": false,
+  "mss_bull": false,
+  "mss_bear": false,
+  "pd_array_long": false,
+  "pd_array_short": false,
+  "structure_valid_long": false,
+  "structure_valid_short": false,
+  "market_source": "unavailable",
+  "reasons": [
+    "No real market data available for XAUUSD. MT5 is not connected or reachable, and synthetic fallback is disabled."
+  ],
+  "passed": false
+}

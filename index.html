@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Trader Portal</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #111b2d;
+      --panel-alt: #17253d;
+      --border: #2a3d5d;
+      --text: #e6edf7;
+      --muted: #9db0c9;
+      --green: #38d39f;
+      --red: #ff6b6b;
+      --amber: #f0b429;
+      --blue: #69a8ff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .container { max-width: 1200px; margin: 32px auto; padding: 0 16px; }
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; margin-bottom: 18px;
+    }
+    .title { font-size: 1.4rem; font-weight: 700; }
+    .badge {
+      padding: 8px 12px; border-radius: 999px; font-weight: 700; border: 1px solid var(--border);
+    }
+    .badge.long { background: rgba(56,211,159,.12); color: var(--green); }
+    .badge.short { background: rgba(255,107,107,.12); color: var(--red); }
+    .badge.flat { background: rgba(240,180,41,.12); color: var(--amber); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .card, .section { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+    .label { font-size: 0.75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .value { font-size: 1.6rem; font-weight: 700; margin-top: 10px; }
+    .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .row:last-child { border-bottom: none; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--green); }
+    .fail { color: var(--red); }
+    .status-box { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel-alt); border: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <div class="title">AI Trader Portal</div>
+        <div class="muted">XAUUSD · ICT view</div>
+      </div>
+      <div id="statusBadge" class="badge flat">LOADING</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">Signal</div>
+        <div id="signalValue" class="value">--</div>
+      </div>
+      <div class="card">
+        <div class="label">Probability</div>
+        <div id="probabilityValue" class="value">--</div>
+      </div>
+      <div class="card">
+        <div class="label">RR Ratio</div>
+        <div id="rrValue" class="value">--</div>
+      </div>
+      <div class="card">
+        <div class="label">Displacement</div>
+        <div id="displacementValue" class="value">--</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="row"><span>Session</span><strong id="sessionValue">--</strong></div>
+      <div class="row"><span>Price</span><strong id="priceValue">--</strong></div>
+      <div class="row"><span>HTF High</span><strong id="htfHighValue">--</strong></div>
+      <div class="row"><span>HTF Low</span><strong id="htfLowValue">--</strong></div>
+      <div class="row"><span>Meaningful HTF objective</span><strong id="htfObjectiveValue">--</strong></div>
+      <div class="row"><span>ICT gate</span><strong id="ictGateValue">--</strong></div>
+      <div class="row"><span>Market source</span><strong id="marketSourceValue">--</strong></div>
+    </div>
+
+    <div class="section">
+      <div class="label">ICT checks</div>
+      <div class="row"><span>Liquidity raid</span><strong id="liquidityRaidValue">--</strong></div>
+      <div class="row"><span>MSS</span><strong id="mssValue">--</strong></div>
+      <div class="row"><span>PD array</span><strong id="pdValue">--</strong></div>
+      <div class="row"><span>Structure valid</span><strong id="structureValue">--</strong></div>
+    </div>
+
+    <div class="section">
+      <div class="label">Why flat / trade logic</div>
+      <div id="reasonBox" class="status-box">Loading...</div>
+    </div>
+  </div>
+
+  <script>
+    async function loadStatus() {
+      try {
+        const response = await fetch('/status.json', { cache: 'no-store' });
+        const data = await response.json();
+        const badge = document.getElementById('statusBadge');
+        badge.textContent = data.status;
+        badge.className = 'badge ' + (data.status === 'LONG' ? 'long' : data.status === 'SHORT' ? 'short' : 'flat');
+
+        document.getElementById('signalValue').textContent = data.signal;
+        document.getElementById('probabilityValue').textContent = (data.probability * 100).toFixed(2) + '%';
+        document.getElementById('rrValue').textContent = data.rr_ratio.toFixed(2);
+        document.getElementById('displacementValue').textContent = data.displacement.toFixed(2);
+        document.getElementById('sessionValue').textContent = data.session;
+        document.getElementById('priceValue').textContent = Number(data.price).toFixed(2);
+        document.getElementById('htfHighValue').textContent = Number(data.htf_high).toFixed(2);
+        document.getElementById('htfLowValue').textContent = Number(data.htf_low).toFixed(2);
+        document.getElementById('htfObjectiveValue').textContent = data.has_meaningful_htf_objective ? 'YES' : 'NO';
+        document.getElementById('ictGateValue').textContent = data.passed ? 'PASSED' : 'FAILED';
+        document.getElementById('marketSourceValue').textContent = (data.market_source || 'synthetic').toUpperCase();
+        document.getElementById('liquidityRaidValue').textContent = (data.liquidity_raid_long || data.liquidity_raid_short) ? 'YES' : 'NO';
+        document.getElementById('mssValue').textContent = (data.mss_bull || data.mss_bear) ? 'YES' : 'NO';
+        document.getElementById('pdValue').textContent = (data.pd_array_long || data.pd_array_short) ? 'YES' : 'NO';
+        document.getElementById('structureValue').textContent = (data.structure_valid_long || data.structure_valid_short) ? 'YES' : 'NO';
+
+        const reasonBox = document.getElementById('reasonBox');
+        if (data.reasons && data.reasons.length) {
+          reasonBox.innerHTML = '<strong>Flat reason:</strong><br>' + data.reasons.join(', ');
+        } else {
+          reasonBox.innerHTML = '<strong>Setup is valid:</strong> the ICT stack is complete and trade logic is approved.';
+        }
+      } catch (err) {
+        document.getElementById('reasonBox').textContent = 'Unable to load status yet.';
+      }
+    }
+    loadStatus();
+    setInterval(loadStatus, 5000);
+  </script>
+</body>
+</html>

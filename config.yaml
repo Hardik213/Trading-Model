@@ -1,0 +1,52 @@
+market:
+  symbol: "XAUUSD"
+  timeframe: "1h"
+  start_date: "2020-01-01"
+  end_date: "2026-09-25"
+
+model:
+  lookback: 60
+  horizon: 12
+  threshold: 0.003
+  probability_threshold: 0.55
+  alignment_threshold: 0.10
+
+risk:
+  initial_capital: 10000
+  max_position_pct: 0.20
+  risk_per_trade: 0.01
+  max_drawdown: 0.20
+  max_positions: 2
+
+trading:
+  paper_trade: true
+  use_live_data: true
+  allow_synthetic_fallback: false
+  session_window: 24
+  trend_filter: true
+
+execution:
+  enabled_sessions: ["Asia", "London", "New York", "Overlap"]
+  entry_windows:
+    Asia: ["00:00", "07:00"]
+    London: ["07:00", "13:00"]
+    New York: ["13:00", "17:00"]
+    Overlap: ["13:00", "15:00"]
+
+ict:
+  session_bias_window: 24
+  liquidity_window: 48
+  structure_window: 12
+
+broker:
+  type: "mt5"
+  account_id: "live"
+  host: "localhost"
+  port: 5000
+  username: "live"
+  password: "UD#3jVub"
+  server: "OctaFX-Real"
+  path: "C:/Program Files/MetaTrader 5/terminal64.exe"
+  demo_account: false
+  symbol: "XAUUSD"
+  login: 62281620

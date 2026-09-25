@@ -1,0 +1,8 @@
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+yfinance>=0.2.40
+PyYAML>=6.0.2
+MetaTrader5>=5.0.45
+Flask>=3.0.0

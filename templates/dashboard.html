@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Trader Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #111b2d;
+      --panel-alt: #17253d;
+      --border: #2a3d5d;
+      --text: #e6edf7;
+      --muted: #9db0c9;
+      --green: #38d39f;
+      --red: #ff6b6b;
+      --amber: #f0b429;
+      --blue: #69a8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .container {
+      max-width: 1200px;
+      margin: 32px auto;
+      padding: 0 16px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding: 18px 20px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel);
+    }
+    .title {
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      border: 1px solid var(--border);
+      background: rgba(105, 168, 255, 0.12);
+      color: var(--blue);
+    }
+    .badge.long { background: rgba(56, 211, 159, 0.12); color: var(--green); }
+    .badge.short { background: rgba(255, 107, 107, 0.12); color: var(--red); }
+    .badge.flat { background: rgba(240, 180, 41, 0.12); color: var(--amber); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .value {
+      font-size: 1.7rem;
+      font-weight: 700;
+      margin: 0;
+    }
+    .value.small { font-size: 1.1rem; }
+    .section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .row:last-child { border-bottom: none; }
+    .row span:first-child { color: var(--muted); }
+    .ok {
+      color: var(--green);
+      font-weight: 700;
+    }
+    .fail {
+      color: var(--red);
+      font-weight: 700;
+    }
+    .status-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-alt);
+      line-height: 1.6;
+    }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <div class="title">AI Trader Portal</div>
+        <div class="muted">XAUUSD · ICT decision view</div>
+      </div>
+      <div class="badge {% if snapshot.status == 'LONG' %}long{% elif snapshot.status == 'SHORT' %}short{% else %}flat{% endif %}">
+        {{ snapshot.status }}
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">Signal</div>
+        <p class="value small">{{ snapshot.signal }}</p>
+      </div>
+      <div class="card">
+        <div class="label">Probability</div>
+        <p class="value small">{{ '%.2f'|format(snapshot.probability * 100) }}%</p>
+      </div>
+      <div class="card">
+        <div class="label">Threshold</div>
+        <p class="value small">{{ '%.2f'|format(snapshot.threshold * 100) }}%</p>
+      </div>
+      <div class="card">
+        <div class="label">RR Ratio</div>
+        <p class="value small">{{ '%.2f'|format(snapshot.rr_ratio) }}</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="row"><span>Session</span><strong>{{ snapshot.session }}</strong></div>
+      <div class="row"><span>Price</span><strong>{{ '%.2f'|format(snapshot.price) }}</strong></div>
+      <div class="row"><span>HTF High</span><strong>{{ '%.2f'|format(snapshot.htf_high) }}</strong></div>
+      <div class="row"><span>HTF Low</span><strong>{{ '%.2f'|format(snapshot.htf_low) }}</strong></div>
+      <div class="row"><span>Displacement</span><strong>{{ '%.2f'|format(snapshot.displacement) }}</strong></div>
+      <div class="row"><span>Meaningful HTF objective</span><strong class="{% if snapshot.has_meaningful_htf_objective %}ok{% else %}fail{% endif %}">{{ snapshot.has_meaningful_htf_objective }}</strong></div>
+      <div class="row"><span>ICT gate</span><strong class="{% if snapshot.passed %}ok{% else %}fail{% endif %}">{{ 'PASSED' if snapshot.passed else 'FAILED' }}</strong></div>
+    </div>
+
+    <div class="section">
+      <div class="label">ICT checks</div>
+      <div class="row"><span>Liquidity raid</span><strong class="{% if snapshot.liquidity_raid_long or snapshot.liquidity_raid_short %}ok{% else %}fail{% endif %}">{{ 'YES' if (snapshot.liquidity_raid_long or snapshot.liquidity_raid_short) else 'NO' }}</strong></div>
+      <div class="row"><span>MSS</span><strong class="{% if snapshot.mss_bull or snapshot.mss_bear %}ok{% else %}fail{% endif %}">{{ 'YES' if (snapshot.mss_bull or snapshot.mss_bear) else 'NO' }}</strong></div>
+      <div class="row"><span>PD array</span><strong class="{% if snapshot.pd_array_long or snapshot.pd_array_short %}ok{% else %}fail{% endif %}">{{ 'YES' if (snapshot.pd_array_long or snapshot.pd_array_short) else 'NO' }}</strong></div>
+      <div class="row"><span>Structure valid</span><strong class="{% if snapshot.structure_valid_long or snapshot.structure_valid_short %}ok{% else %}fail{% endif %}">{{ 'YES' if (snapshot.structure_valid_long or snapshot.structure_valid_short) else 'NO' }}</strong></div>
+    </div>
+
+    <div class="section">
+      <div class="label">Reasoning</div>
+      {% if snapshot.reasons %}
+        <div class="status-box">
+          <strong>Flat reason:</strong><br>
+          {{ snapshot.reasons|join(', ') }}
+        </div>
+      {% else %}
+        <div class="status-box">
+          <strong>Setup is valid:</strong> the ICT stack is complete and trade logic is approved.
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
