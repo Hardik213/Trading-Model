@@ -53,14 +53,26 @@ class PaperTrader:
         trend_bias = 1.0 if float(row["sma_fast"]) >= float(row["sma_slow"]) else -1.0
         is_entry_session = bool(row.get("is_entry_session", True))
 
-        htf_high = float(row.get("htf_high_24", 0.0))
-        htf_low = float(row.get("htf_low_24", 0.0))
-        price = float(row.get("Close", 0.0))
+        htf_high = float(row.get("htf_high_24", row.get("htf_high", 0.0)))
+        htf_low = float(row.get("htf_low_24", row.get("htf_low", 0.0)))
+        close_price = row.get("Close", row.get("close", row.get("price", None)))
+        if close_price is None:
+            if htf_high > 0 and htf_low > 0:
+                close_price = (htf_high + htf_low) / 2.0
+            else:
+                close_price = 0.0
+        price = float(close_price)
         atr = float(row.get("atr", 1.0))
         displacement = float(row.get("displacement", 0.0))
         rr_ratio = float(row.get("rr_ratio", 0.0))
 
-        has_meaningful_htf_objective = abs(price - htf_high) <= max(atr * 1.5, 1e-6) or abs(price - htf_low) <= max(atr * 1.5, 1e-6)
+        htf_mid = (htf_high + htf_low) / 2.0 if htf_high > 0 and htf_low > 0 else price
+        has_meaningful_htf_objective = (
+            abs(price - htf_high) <= max(atr * 1.5, 1e-6)
+            or abs(price - htf_low) <= max(atr * 1.5, 1e-6)
+            or (htf_low <= price <= htf_high)
+            or (abs(price - htf_mid) <= max(atr * 1.5, 1e-6) and htf_high > 0 and htf_low > 0)
+        )
         long_ok = (
             is_entry_session
             and probability >= model_cfg["probability_threshold"]
