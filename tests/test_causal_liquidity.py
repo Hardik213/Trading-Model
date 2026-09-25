@@ -62,6 +62,31 @@ def test_latest_reversal_requires_opposing_rejection():
     assert event.is_rejection
 
 
+def test_pre_confirmation_breach_never_becomes_reversal_evidence():
+    df = frame([
+        (100, 101, 99, 100),
+        (99, 100, 89, 98),
+        (98, 99, 97, 98),
+        (95, 96, 93, 94),
+        (94, 95, 94, 94.5),
+        (94, 101, 93, 100),
+    ])
+    assert not liquidity_evidence_as_of(
+        df,
+        df.index[4],
+        side=LiquiditySide.SSL,
+        left_bars=1,
+        right_bars=1,
+    )
+    assert not liquidity_evidence_as_of(
+        df,
+        df.index[5],
+        side=LiquiditySide.SSL,
+        left_bars=1,
+        right_bars=1,
+    )
+
+
 def test_draw_on_liquidity_uses_only_visible_confirmed_levels():
     df = frame([
         (100, 102, 99, 101),

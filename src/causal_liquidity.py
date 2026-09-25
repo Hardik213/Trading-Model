@@ -103,10 +103,13 @@ def confirmed_liquidity_map(
         right_bars=right_bars,
     )
     visible_swings = [s for s in swings if pd.Timestamp(s.confirmation_timestamp) < ts]
-    return swings_to_liquidity(
+    levels = swings_to_liquidity(
         visible_swings,
         equal_tolerance=equal_tolerance,
     )
+    for level, swing in zip(levels, visible_swings):
+        object.__setattr__(level, "confirmation_timestamp", swing.confirmation_timestamp)
+    return levels
 
 
 def _candidate_breach(
@@ -121,10 +124,15 @@ def _candidate_breach(
     if visible.empty:
         return None
 
-    # A level cannot be used before its source swing was confirmed.  The level
-    # timestamp is the source swing time; its confirmation is enforced by the
-    # caller's confirmed map, so only scan bars after that source timestamp.
-    eligible = visible.loc[visible.index >= pd.Timestamp(level.timestamp)]
+    # A level cannot be used before its source swing was confirmed. The breach
+    # scan must start on or after the source swing's confirmation timestamp, not
+    # merely the original swing timestamp. This blocks a raw breach from being
+    # retroactively turned into reversal evidence before the level was known.
+    confirmation_ts = getattr(level, "confirmation_timestamp", None)
+    lower_bound = pd.Timestamp(level.timestamp)
+    if confirmation_ts is not None:
+        lower_bound = max(lower_bound, pd.Timestamp(confirmation_ts))
+    eligible = visible.loc[visible.index >= lower_bound]
     if eligible.empty:
         return None
 
