@@ -44,9 +44,9 @@ broker:
   host: "localhost"
   port: 5000
   username: "live"
-  password: "UD#3jVub"
-  server: "OctaFX-Real"
-  path: "C:/Program Files/MetaTrader 5/terminal64.exe"
+  password: ""
+  server: ""
+  path: ""
   demo_account: false
   symbol: "XAUUSD"
-  login: 62281620
+  login: 
