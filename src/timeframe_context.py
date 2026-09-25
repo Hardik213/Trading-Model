@@ -76,6 +76,7 @@ def build_context(
             )
             .dropna()
         )
+        resampled = resampled.loc[resampled.index <= base.index.max()].copy()
         resampled.attrs["timeframe"] = label
         resampled.attrs["source"] = source
         resampled.attrs["timezone"] = "UTC"

@@ -8,7 +8,7 @@ import pandas as pd
 
 from .dealing_range import DealingRange
 from .fvg import FVG, FVGDirection
-from .mss import Direction, MSSEvent
+from .mss import Direction, MSSEvent, normalize_direction
 from .market_structure import (
     BreachOutcome,
     LiquidityEvent,
@@ -95,6 +95,8 @@ class ICT2022StateMachine:
                 "No directional hypothesis is established."
             )
 
+        direction = normalize_direction(direction)
+
         self._set(SetupState.CONTEXT_IDENTIFIED)
         if draw_on_liquidity is None:
             self._set(SetupState.DEVELOPING)
@@ -144,7 +146,7 @@ class ICT2022StateMachine:
         self._set(SetupState.RAID_OR_ACCEPTANCE_RESOLUTION)
 
         expected_rejection_side = (
-            LiquiditySide.SSL if direction is Direction.BULLISH
+            LiquiditySide.SSL if normalize_direction(direction) is Direction.BULLISH
             else LiquiditySide.BSL
         )
 
@@ -186,14 +188,14 @@ class ICT2022StateMachine:
                 "Displacement/MSS confirmation is incomplete."
             )
 
-        if mss.direction is not direction:
+        if normalize_direction(mss.direction) is not normalize_direction(direction):
             self._set(SetupState.NO_TRADE)
             return SetupDecision(
                 self.state, direction,
                 "Structural shift direction conflicts with the proposed setup."
             )
 
-        if not mss.displacement.follow_through or not mss.follow_through:
+        if mss.displacement is None or not mss.displacement.follow_through or not mss.follow_through:
             self._set(SetupState.DEVELOPING)
             return SetupDecision(
                 self.state, direction,
@@ -227,7 +229,7 @@ class ICT2022StateMachine:
             )
 
         expected = (
-            FVGDirection.BULLISH if direction is Direction.BULLISH
+            FVGDirection.BULLISH if normalize_direction(direction) is Direction.BULLISH
             else FVGDirection.BEARISH
         )
         if pd_array.direction is not expected:
@@ -290,7 +292,7 @@ class ICT2022StateMachine:
                 "No structural invalidation and/or opposing-liquidity target is defined."
             )
 
-        if direction is Direction.BULLISH:
+        if normalize_direction(direction) is Direction.BULLISH:
             valid_geometry = invalidation < entry < target
         else:
             valid_geometry = target < entry < invalidation
@@ -323,7 +325,7 @@ class ICT2022StateMachine:
                 "No active trade exists."
             )
 
-        if direction is Direction.BULLISH:
+        if normalize_direction(direction) is Direction.BULLISH:
             hit_stop = current_low <= invalidation
             hit_target = current_high >= target
         else:

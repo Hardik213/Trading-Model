@@ -8,7 +8,7 @@ import pandas as pd
 from .dealing_range import DealingRange
 from .fvg import FVG
 from .ict2022_engine import ICT2022StateMachine, SetupContext, SetupDecision, SetupState
-from .mss import Direction, MSSEvent
+from .mss import Direction, MSSEvent, normalize_direction
 from .market_structure import LiquidityEvent, LiquidityLevel
 
 
@@ -59,7 +59,7 @@ def _planned_r(
     if risk <= 0:
         return None
 
-    if direction is Direction.BULLISH:
+    if normalize_direction(direction) is Direction.BULLISH:
         if not invalidation < entry < target:
             return None
     else:

@@ -10,6 +10,8 @@ import pandas as pd
 class Direction(str, Enum):
     BULLISH = "BULLISH"
     BEARISH = "BEARISH"
+    LONG = "LONG"
+    SHORT = "SHORT"
 
 
 @dataclass(frozen=True)
@@ -21,106 +23,141 @@ class DisplacementEvent:
     magnitude: float
     body_ratio: float
     close_location: float
-    range_expansion: Optional[float]
+    range_expansion: float
     follow_through: bool
-    structural_consequence: bool = False
+    confirmation_timestamp: Optional[pd.Timestamp] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", Direction(self.direction))
 
 
-def candle_metrics(row: pd.Series) -> tuple[float, float, float]:
-    high = float(row["High"])
-    low = float(row["Low"])
-    open_ = float(row["Open"])
-    close = float(row["Close"])
+def _normalize_direction(direction: Direction | str) -> Direction:
+    if direction is None:
+        raise ValueError("direction is required")
+    if isinstance(direction, Direction):
+        return direction
+    text = str(direction).upper().split(".")[-1]
+    if text in {"LONG", "BULLISH"}:
+        return Direction.BULLISH
+    if text in {"SHORT", "BEARISH"}:
+        return Direction.BEARISH
+    raise ValueError(f"Unsupported direction: {direction!r}")
 
-    rng = high - low
-    if rng <= 0:
-        return 0.0, 0.5, 0.0
 
-    body = abs(close - open_)
-    body_ratio = body / rng
-    close_location = (close - low) / rng
-    return rng, close_location, body_ratio
+def _column(frame, *names):
+    for name in names:
+        if name in frame.columns:
+            return frame[name]
+    lowered = {str(col).lower(): col for col in frame.columns}
+    for name in names:
+        if str(name).lower() in lowered:
+            return frame[lowered[str(name).lower()]]
+    raise KeyError(names[0])
 
 
 def detect_displacement(
-    df: pd.DataFrame,
-    position: int,
+    df,
+    position,
+    direction,
     *,
-    direction: Direction,
-    baseline_bars: int = 20,
-    min_body_ratio: float = 0.60,
-    min_range_expansion: float = 1.25,
-    follow_through_bars: int = 2,
-) -> Optional[DisplacementEvent]:
-    """
-    Objective first-pass displacement observation.
+    body_ratio: float = 0.6,
+    range_multiplier: float = 1.5,
+    min_range_expansion: Optional[float] = None,
+    lookback: int = 5,
+    follow_through_bars: int = 0,
+):
+    if df is None or len(df) == 0 or position < 0 or position >= len(df):
+        return None
 
-    This is intentionally NOT a trade signal and does not assign a confidence
-    score. Thresholds are explicit research parameters and must be validated
-    later. The event is strengthened by follow-through but is never inferred
-    from a wick alone.
-    """
-    if not isinstance(df.index, pd.DatetimeIndex):
-        raise TypeError("OHLC index must be a DatetimeIndex.")
-    if position < 0 or position >= len(df):
-        raise IndexError("position outside dataframe.")
-    if baseline_bars < 2:
-        raise ValueError("baseline_bars must be >= 2.")
-    if follow_through_bars < 0:
-        raise ValueError("follow_through_bars must be >= 0.")
+    direction = _normalize_direction(direction)
+    effective_range_expansion = min_range_expansion if min_range_expansion is not None else range_multiplier
 
     row = df.iloc[position]
-    rng, close_location, body_ratio = candle_metrics(row)
+    high = float(_column(row.to_frame().T, "High", "high").iloc[0])
+    low = float(_column(row.to_frame().T, "Low", "low").iloc[0])
+    op = float(_column(row.to_frame().T, "Open", "open").iloc[0])
+    close = float(_column(row.to_frame().T, "Close", "close").iloc[0])
+    rng = high - low
     if rng <= 0:
         return None
 
-    start = max(0, position - baseline_bars)
-    baseline = (df["High"] - df["Low"]).iloc[start:position]
-    if len(baseline) < 2:
+    impulse_body = abs(close - op) / rng
+    if impulse_body < body_ratio:
         return None
 
-    median_range = float(baseline.median())
-    if median_range <= 0:
+    prior = df.iloc[max(0, position - lookback):position]
+    if len(prior) == 0:
+        return None
+    baseline = float((
+        _column(prior, "High", "high").astype(float) -
+        _column(prior, "Low", "low").astype(float)
+    ).mean())
+    if baseline <= 0 or rng < baseline * effective_range_expansion:
         return None
 
-    expansion = rng / median_range
-    open_ = float(row["Open"])
-    close = float(row["Close"])
+    if direction is Direction.BULLISH and close <= op:
+        return None
+    if direction is Direction.BEARISH and close >= op:
+        return None
 
     if direction is Direction.BULLISH:
-        directional = close > open_
-        close_quality = close_location >= 0.70
+        start_price = min(op, close)
+        end_price = max(op, close)
+        impulse = high
+        confirmation_price = high
+        event_direction = "LONG"
     else:
-        directional = close < open_
-        close_quality = close_location <= 0.30
+        start_price = max(op, close)
+        end_price = min(op, close)
+        impulse = low
+        confirmation_price = low
+        event_direction = "SHORT"
 
-    if not directional:
-        return None
-    if body_ratio < min_body_ratio:
-        return None
-    if expansion < min_range_expansion:
-        return None
-    if not close_quality:
-        return None
+    timestamp = pd.Timestamp(df.index[position])
+    if follow_through_bars <= 0:
+        return DisplacementEvent(
+            timestamp=timestamp,
+            direction=event_direction,
+            start_price=start_price,
+            end_price=end_price,
+            magnitude=abs(close - op),
+            body_ratio=impulse_body,
+            close_location=(close - low) / rng if rng else 0.0,
+            range_expansion=rng / max(baseline, 1e-9),
+            follow_through=True,
+            confirmation_timestamp=timestamp,
+        )
 
-    follow_through = False
-    if follow_through_bars:
-        end = min(len(df), position + 1 + follow_through_bars)
-        future = df.iloc[position + 1:end]
-        if len(future):
-            if direction is Direction.BULLISH:
-                follow_through = float(future["High"].max()) > float(row["High"])
-            else:
-                follow_through = float(future["Low"].min()) < float(row["Low"])
+    future = df.iloc[position + 1 : min(len(df), position + 1 + follow_through_bars)]
+    confirmation = None
+    for idx, r in future.iterrows():
+        value = float(_column(r.to_frame().T, "High", "high").iloc[0]) if direction is Direction.BULLISH else float(_column(r.to_frame().T, "Low", "low").iloc[0])
+        if direction is Direction.BULLISH and value > confirmation_price:
+            confirmation = pd.Timestamp(idx)
+            break
+        if direction is Direction.BEARISH and value < confirmation_price:
+            confirmation = pd.Timestamp(idx)
+            break
 
     return DisplacementEvent(
-        timestamp=df.index[position],
-        direction=direction,
-        start_price=open_,
-        end_price=close,
-        magnitude=abs(close - open_),
-        body_ratio=body_ratio,
-        close_location=close_location,
-        range_expansion=expansion,
-        follow_through=follow_through,
+        timestamp=timestamp,
+        direction=event_direction,
+        start_price=start_price,
+        end_price=end_price,
+        magnitude=abs(close - op),
+        body_ratio=impulse_body,
+        close_location=(close - low) / rng if rng else 0.0,
+        range_expansion=rng / max(baseline, 1e-9),
+        follow_through=confirmation is not None,
+        confirmation_timestamp=confirmation,
     )
+
+
+def is_confirmed_as_of(event, as_of):
+    return (
+        event is not None
+        and event.follow_through
+        and event.confirmation_timestamp is not None
+        and pd.Timestamp(event.confirmation_timestamp) <= pd.Timestamp(as_of)
+    )
+
