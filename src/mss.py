@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Optional, Sequence
 
 import pandas as pd
@@ -75,12 +74,17 @@ def detect_mss(
     swings: Optional[Sequence[object]] = None,
     liquidity_event=None,
     displacement: Optional[DisplacementEvent] = None,
-    follow_through_bars: int = 0,
+    follow_through_bars: int = 2,
 ):
     if break_position is None:
         break_position = len(df) - 1
 
     if df is None or len(df) == 0 or break_position < 0 or break_position >= len(df):
+        return None
+
+    ts = pd.Timestamp(df.index[break_position])
+
+    if displacement is not None and follow_through_bars > 0 and break_position + 1 >= len(df):
         return None
 
     candidate = _candidate_structure(df, break_position)
@@ -105,7 +109,6 @@ def detect_mss(
                 return None
             if str(liquidity_event.level.side).endswith(expected_side) is False:
                 return None
-        ts = pd.Timestamp(df.index[break_position])
         confirmation = ts
         if follow_through_bars > 0:
             future = df.iloc[break_position + 1: min(len(df), break_position + 1 + follow_through_bars)]
@@ -149,7 +152,6 @@ def detect_mss(
         if str(liquidity_event.level.side).endswith(expected_side) is False:
             return None
 
-    ts = pd.Timestamp(df.index[break_position])
     confirmation = ts
     if follow_through_bars > 0:
         future = df.iloc[break_position + 1: min(len(df), break_position + 1 + follow_through_bars)]
@@ -185,3 +187,4 @@ def is_confirmed_as_of(event, as_of):
         and event.confirmation_timestamp is not None
         and pd.Timestamp(event.confirmation_timestamp) <= pd.Timestamp(as_of)
     )
+
