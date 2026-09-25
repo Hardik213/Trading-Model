@@ -174,6 +174,7 @@ class ICT2022StateMachine:
         *,
         mss: Optional[MSSEvent],
         direction: Direction,
+        as_of: Optional[pd.Timestamp] = None,
     ) -> SetupDecision:
         if self.state is not SetupState.RAID_OR_ACCEPTANCE_RESOLUTION:
             return SetupDecision(
@@ -195,12 +196,40 @@ class ICT2022StateMachine:
                 "Structural shift direction conflicts with the proposed setup."
             )
 
-        if mss.displacement is None or not mss.displacement.follow_through or not mss.follow_through:
+        if mss.displacement is None or not mss.displacement.follow_through:
             self._set(SetupState.DEVELOPING)
             return SetupDecision(
                 self.state, direction,
                 "Structural break lacks required follow-through."
             )
+
+        if not mss.follow_through:
+            self._set(SetupState.DEVELOPING)
+            return SetupDecision(
+                self.state, direction,
+                "MSS confirmation has not yet been observed."
+            )
+
+        if as_of is not None:
+            as_of_ts = pd.Timestamp(as_of)
+            if pd.Timestamp(mss.timestamp) > as_of_ts:
+                self._set(SetupState.DEVELOPING)
+                return SetupDecision(
+                    self.state, direction,
+                    "MSS timestamp is not yet visible at the selected as-of point."
+                )
+            if mss.displacement is not None and mss.displacement.confirmation_timestamp is not None and pd.Timestamp(mss.displacement.confirmation_timestamp) > as_of_ts:
+                self._set(SetupState.DEVELOPING)
+                return SetupDecision(
+                    self.state, direction,
+                    "Displacement confirmation is not yet visible at the selected as-of point."
+                )
+            if mss.confirmation_timestamp is not None and pd.Timestamp(mss.confirmation_timestamp) > as_of_ts:
+                self._set(SetupState.DEVELOPING)
+                return SetupDecision(
+                    self.state, direction,
+                    "MSS confirmation is not yet visible at the selected as-of point."
+                )
 
         self._set(SetupState.DISPLACEMENT_CONFIRMED)
         self._set(SetupState.MSS_CONFIRMED)
