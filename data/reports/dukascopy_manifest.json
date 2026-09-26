@@ -1,0 +1,69 @@
+{
+  "dataset_name": "Dukascopy free-data export",
+  "duplicate_rows_after_first": 20117,
+  "duplicate_rows_in_duplicate_groups": 23322,
+  "duplicate_timestamp_values": 3205,
+  "duplicate_timestamps": 20117,
+  "first_timestamp_utc": "2022-03-01T12:00:00+00:00",
+  "gap_distribution": {
+    "0 days 00:00:01": 3263,
+    "0 days 00:00:02": 125,
+    "0 days 00:00:03": 17,
+    "0 days 00:00:04": 6,
+    "0 days 00:00:05": 1,
+    "0 days 00:00:06": 1
+  },
+  "instrument": "XAUUSD",
+  "internal_timezone": "UTC",
+  "invalid_ohlc_rows": 0,
+  "largest_gaps": [
+    {
+      "duration": "0 days 00:00:06",
+      "end_utc": "2022-03-01T12:33:52+00:00",
+      "start_utc": "2022-03-01T12:33:46+00:00"
+    },
+    {
+      "duration": "0 days 00:00:05",
+      "end_utc": "2022-03-01T12:20:17+00:00",
+      "start_utc": "2022-03-01T12:20:12+00:00"
+    },
+    {
+      "duration": "0 days 00:00:04",
+      "end_utc": "2022-03-01T12:44:22+00:00",
+      "start_utc": "2022-03-01T12:44:18+00:00"
+    },
+    {
+      "duration": "0 days 00:00:04",
+      "end_utc": "2022-03-01T12:44:07+00:00",
+      "start_utc": "2022-03-01T12:44:03+00:00"
+    },
+    {
+      "duration": "0 days 00:00:04",
+      "end_utc": "2022-03-01T12:18:23+00:00",
+      "start_utc": "2022-03-01T12:18:19+00:00"
+    }
+  ],
+  "last_timestamp_utc": "2022-03-01T12:59:59+00:00",
+  "nan_ohlc_values": 0,
+  "negative_volume_rows": 0,
+  "non_monotonic_rows": 0,
+  "notes": [
+    "Raw observations are preserved without forward-filling or synthetic candle generation.",
+    "Duplicate timestamps are kept for Dukascopy raw tick observations and are not silently dropped.",
+    "Octa MT4 values are normalized from local UTC+3 provenance to internal UTC before use.",
+    "The 15-minute Octa dataset is treated as a 15min source only and not coerced to a finer timeframe.",
+    "No missing timestamps are filled or synthesized; timestamps are validated as-is from the originating raw file.",
+    "Octa 15M history is never resampled downward into 5M, 3M, or 1M series for research use."
+  ],
+  "research_classification": "PRIMARY",
+  "research_role": "primary_historical_dukascopy",
+  "rows": 23531,
+  "safe_for_forensic_use": true,
+  "source": "Dukascopy free-data export",
+  "source_timeframe": "tick",
+  "source_timezone": "UTC",
+  "status": "forensic_review_only",
+  "timeframe": "tick",
+  "timestamp_column": "timestamp",
+  "volume_semantics": "UNKNOWN"
+}

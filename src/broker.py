@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
+from src.execution_firewall import ExecutionPolicy
 from src.mt5_bridge import MT5ExecutionBridge
 
 
@@ -86,7 +87,7 @@ class DemoExecutionEngine:
 
 
 class MT5DemoBrokerAdapter(BrokerAdapter):
-    def __init__(self, symbol: str = "XAUUSD", *, host: str = "localhost", port: int = 5000, username: str = "demo", password: str = "demo", server: str | None = None, path: str | None = None, login: int | None = None, demo: bool = True):
+    def __init__(self, symbol: str = "XAUUSD", *, host: str = "localhost", port: int = 5000, username: str = "demo", password: str = "demo", server: str | None = None, path: str | None = None, login: int | None = None, demo: bool = True, policy: ExecutionPolicy | None = None):
         super().__init__(symbol=symbol, paper=demo)
         self.host = host
         self.port = port
@@ -96,6 +97,7 @@ class MT5DemoBrokerAdapter(BrokerAdapter):
         self.path = path
         self.login = login
         self.demo = demo
+        self.policy = policy or ExecutionPolicy(mode="research", allow_demo=False, allow_live=False)
         self.connection_log: List[str] = []
         self.execution = DemoExecutionEngine(account_balance=self.account_balance)
         self.bridge = MT5ExecutionBridge(path=path, login=str(login) if login is not None else None, password=password, server=server, symbol=symbol)
@@ -107,6 +109,9 @@ class MT5DemoBrokerAdapter(BrokerAdapter):
         return connected
 
     def place_order(self, side: str, price: float, quantity: float = 0.1, *, stop_loss: float | None = None, take_profit: float | None = None) -> Order:
+        destination = "demo" if self.demo else "live"
+        self.policy.authorize(destination=destination)
+
         if not self.connect():
             self.connection_log.append(f"MT5 bridge unavailable. Falling back to demo execution for {side} {self.symbol}")
             order = Order(side=side.lower(), symbol=self.symbol, price=float(price), quantity=float(quantity), status="simulated", ticket=len(self.orders) + 1)
@@ -148,6 +153,12 @@ class BrokerFactory:
             except (TypeError, ValueError):
                 login = None
 
+            policy = ExecutionPolicy(
+                mode=str(config.get("mode", "research")),
+                allow_demo=bool(config.get("allow_demo", False)),
+                allow_live=bool(config.get("allow_live", False)),
+            )
+
             return MT5DemoBrokerAdapter(
                 symbol=symbol,
                 host=config.get("host", "localhost"),
@@ -158,5 +169,6 @@ class BrokerFactory:
                 path=config.get("path"),
                 login=login,
                 demo=bool(config.get("demo_account", False)),
+                policy=policy,
             )
         return BrokerAdapter(symbol=symbol, paper=True)
