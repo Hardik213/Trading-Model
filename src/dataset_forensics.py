@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,28 +64,100 @@ def _normalise_source_frame(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = df.copy()
     cleaned.columns = [str(column).strip() for column in cleaned.columns]
     cleaned.columns = [column.replace("\ufeff", "") for column in cleaned.columns]
+    rename_map = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume",
+        "timestamp": "timestamp",
+    }
+    cleaned = cleaned.rename(columns={k: v for k, v in rename_map.items() if k in [str(col).lower() for col in cleaned.columns]})
     return cleaned
 
 
-def _load_dataset_frame(path: Path) -> pd.DataFrame:
-    if "octa" in path.name.lower() or "xau_15m" in path.name.lower() or "15m" in path.name.lower():
-        frame = pd.read_csv(path, sep=";")
-        frame = _normalise_source_frame(frame)
-        frame["timestamp"] = pd.to_datetime(frame["Date"], format="%Y.%m.%d %H:%M", errors="coerce")
-        frame["timestamp"] = frame["timestamp"].dt.tz_localize("Etc/GMT-3").dt.tz_convert("UTC")
-        return frame
+def _select_preferred_dataset_file(files: list[Path], base_dir: Path | None = None) -> Path:
+    if not files:
+        raise FileNotFoundError("No CSV dataset files were found.")
+    base_dir = base_dir or files[0].parent
+    root_files = [path for path in files if path.parent == base_dir and path.is_file()]
+    if root_files:
+        return sorted(root_files, key=lambda p: str(p))[0]
+    return sorted(files, key=lambda p: str(p))[0]
 
+
+def _looks_like_tick_frame(frame: pd.DataFrame) -> bool:
+    columns = {str(column).strip() for column in frame.columns}
+    return {"timestamp", "askPrice", "bidPrice"}.issubset(columns)
+
+
+def _looks_like_legacy_ohlcv_frame(frame: pd.DataFrame) -> bool:
+    columns = {str(column).strip() for column in frame.columns}
+    return {"Etc/UTC", "Open", "High", "Low", "Close", "Volume"}.issubset(columns)
+
+
+def _coerce_legacy_timestamp(frame: pd.DataFrame) -> pd.Series:
+    ts_name = next((name for name in frame.columns if str(name).strip() in {"Etc/UTC", "timestamp", "Timestamp"}), None)
+    if ts_name is None:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
+    ts = pd.to_datetime(frame[ts_name], errors="coerce", utc=True)
+    return ts
+
+
+def _coerce_tick_timestamps(frame: pd.DataFrame) -> pd.Series:
+    ts_series = frame["timestamp"]
+    numeric = pd.to_numeric(ts_series, errors="coerce")
+    if numeric.empty:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
+
+    numeric = numeric.copy()
+    if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+        numeric = numeric.where(np.isfinite(numeric.to_numpy(dtype=float)))
+    integer_like = np.isclose(numeric.to_numpy(dtype=float), np.rint(numeric.to_numpy(dtype=float)))
+    numeric = numeric.where(integer_like)
+    numeric = numeric.where((numeric >= 0) & (numeric <= 4102444799999), np.nan)
+    parsed = pd.to_datetime(numeric.astype("Int64"), unit="ms", errors="coerce", utc=True)
+    return parsed.astype("datetime64[ns, UTC]")
+
+
+def _load_dataset_frame(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
     frame = _normalise_source_frame(frame)
-    frame["timestamp"] = pd.to_datetime(frame["Etc/UTC"], errors="coerce", utc=True)
+
+    if _looks_like_tick_frame(frame):
+        frame["timestamp"] = _coerce_tick_timestamps(frame)
+        frame["askPrice"] = pd.to_numeric(frame["askPrice"], errors="coerce")
+        frame["bidPrice"] = pd.to_numeric(frame["bidPrice"], errors="coerce")
+        return frame
+
+    if _looks_like_legacy_ohlcv_frame(frame):
+        frame["timestamp"] = _coerce_legacy_timestamp(frame)
+        for column in ["Open", "High", "Low", "Close", "Volume"]:
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        return frame
+
+    # Fallback for non-standard or malformed raw files: keep the raw shape but coerce known timestamp columns
+    if "timestamp" in frame.columns:
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
     return frame
 
 
-def _detect_invalid_ohlc(frame: pd.DataFrame) -> tuple[int, int, int]:
-    required = {"Open", "High", "Low", "Close", "Volume"}
+def _detect_invalid_ohlc(frame: pd.DataFrame) -> tuple[int, int, int, int, int, int]:
+    required = {"Open", "High", "Low", "Close"}
+    if {"timestamp"}.issubset(frame.columns) and {"askPrice", "bidPrice"}.issubset(frame.columns):
+        ask = pd.to_numeric(frame["askPrice"], errors="coerce")
+        bid = pd.to_numeric(frame["bidPrice"], errors="coerce")
+        invalid_rows = int(((ask.isna()) | (bid.isna()) | (ask <= 0) | (bid <= 0) | (ask < bid)).sum())
+        nan_total = int((ask.isna() | bid.isna()).sum())
+        negative_volume = 0
+        zero_or_negative = int(((ask <= 0) | (bid <= 0)).sum())
+        crossed = int((ask < bid).sum())
+        return invalid_rows, nan_total, negative_volume, zero_or_negative, crossed, 0
+
     missing = required.difference(frame.columns)
     if missing:
-        return len(frame), 0, 0
+        return len(frame), 0, 0, 0, 0, 0
 
     numeric = frame.copy()
     for column in ["Open", "High", "Low", "Close", "Volume"]:
@@ -103,7 +176,9 @@ def _detect_invalid_ohlc(frame: pd.DataFrame) -> tuple[int, int, int]:
     invalid_rows = int(invalid.sum())
     nan_total = int(numeric[["Open", "High", "Low", "Close", "Volume"]].isna().sum().sum())
     negative_volume = int((numeric["Volume"] < 0).sum())
-    return invalid_rows, nan_total, negative_volume
+    zero_or_negative = int(((numeric[["Open", "High", "Low", "Close"]] <= 0).any(axis=1)).sum())
+    crossed = int(((numeric["High"] < numeric["Low"]) | (numeric["Low"] > numeric["Open"]) | (numeric["High"] < numeric["Close"])) .sum())
+    return invalid_rows, nan_total, negative_volume, zero_or_negative, crossed, 0
 
 
 def _summarise_gap_distribution(timestamps: pd.Series) -> dict[str, int]:
@@ -116,24 +191,21 @@ def _summarise_gap_distribution(timestamps: pd.Series) -> dict[str, int]:
 
 
 def _largest_gaps(timestamps: pd.Series, top_n: int = 5) -> list[dict[str, Any]]:
+    if timestamps.empty:
+        return []
     positive = timestamps.diff().dropna()
     positive = positive[positive > pd.Timedelta(0)]
     if positive.empty:
         return []
 
-    items: list[dict[str, Any]] = []
-    for delta in positive.sort_values(ascending=False).head(top_n).index:
-        # The index above is a timedelta; the original gap is paired with the trailing timestamp.
-        trailing = timestamps[timestamps.index[positive.index.get_loc(delta)]].__class__
-        _ = trailing
-    # Use a simpler, deterministic path based on the original series positions.
-    series = timestamps.reset_index(drop=True)
-    diffs = series.diff().dropna()
-    positive_idx = diffs[diffs > pd.Timedelta(0)]
     gaps: list[dict[str, Any]] = []
-    for idx, delta in positive_idx.sort_values(ascending=False).head(top_n).items():
-        start = series.iloc[max(0, idx - 1)]
-        end = series.iloc[idx]
+    for delta in positive.sort_values(ascending=False).head(top_n).index:
+        matches = positive[positive == delta]
+        if matches.empty:
+            continue
+        idx = matches.index[0]
+        start = timestamps.iloc[max(0, idx - 1)]
+        end = timestamps.iloc[idx]
         gaps.append(
             {
                 "start_utc": pd.Timestamp(start).isoformat(),
@@ -166,13 +238,15 @@ def analyze_dataset(
         source_name = source_name or "synthetic"
         source_timezone = source_timezone or "UTC"
         internal_timezone = internal_timezone or "UTC"
-        timeframe = timeframe or "15min"
+        timeframe = timeframe or ("tick" if _looks_like_tick_frame(frame) else "15min")
         if "timestamp" not in frame.columns:
             raise ValueError("Synthetic data must include a 'timestamp' column")
     else:
         csv_path = Path(path_like)
         if csv_path.is_dir():
-            csv_path = discover_dataset_files(csv_path)[0]
+            files = discover_dataset_files(csv_path)
+            if files:
+                csv_path = _select_preferred_dataset_file(files, csv_path)
         if not csv_path.exists():
             raise FileNotFoundError(f"Dataset path does not exist: {csv_path}")
         inferred_source_name, inferred_source_timezone, inferred_internal_timezone, inferred_timeframe, _, _ = _infer_source(csv_path)
@@ -183,24 +257,12 @@ def analyze_dataset(
         frame = _load_dataset_frame(csv_path)
 
     frame = _normalise_source_frame(frame)
-    column_map = {str(column).strip(): str(column).strip() for column in frame.columns}
-    for lower_name, canonical_name in {
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-        "volume": "Volume",
-    }.items():
-        candidates = [key for key in frame.columns if str(key).lower() == lower_name]
-        if candidates:
-            frame[canonical_name] = pd.to_numeric(frame[candidates[0]], errors="coerce")
-    if "timestamp" not in frame.columns and "Timestamp" in frame.columns:
-        frame["timestamp"] = frame["Timestamp"]
-
-    raw_timestamps = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
-    valid_timestamps = raw_timestamps.dropna().sort_values()
+    schema_type = "tick" if _looks_like_tick_frame(frame) else "ohlcv"
+    timestamp_series = _coerce_tick_timestamps(frame) if schema_type == "tick" else _coerce_legacy_timestamp(frame)
+    timestamp_series = pd.to_datetime(timestamp_series, errors="coerce", utc=True)
+    valid_timestamps = timestamp_series.dropna().sort_values()
     gap_distribution = _summarise_gap_distribution(valid_timestamps)
-    invalid_ohlc_rows, nan_total, negative_volume = _detect_invalid_ohlc(frame)
+    invalid_ohlc_rows, nan_total, negative_volume, zero_or_negative, crossed_quotes, invalid_timestamp_rows = _detect_invalid_ohlc(frame)
     duplicate_rows_after_first = int(valid_timestamps.duplicated(keep="first").sum())
     duplicate_rows_in_duplicate_groups = int(valid_timestamps.duplicated(keep=False).sum())
     duplicate_timestamp_values = int((valid_timestamps.value_counts() > 1).sum())
@@ -212,11 +274,13 @@ def analyze_dataset(
         "internal_timezone": internal_timezone,
         "source_timeframe": timeframe,
         "timeframe": timeframe,
+        "schema_type": schema_type,
+        "timestamp_unit": "ms" if schema_type == "tick" else "legacy_ohlcv",
         "instrument": "XAUUSD",
         "research_role": "primary_historical_dukascopy" if "Dukascopy" in source_name else "secondary_robustness_15m",
         "research_classification": "PRIMARY" if "Dukascopy" in source_name else "SECONDARY",
         "rows": int(len(frame)),
-        "timestamp_column": "timestamp",
+        "timestamp_column": "timestamp" if schema_type == "tick" else next((name for name in frame.columns if str(name).strip() in {"Etc/UTC", "timestamp", "Timestamp"}), "timestamp"),
         "first_timestamp_utc": valid_timestamps.min().isoformat() if not valid_timestamps.empty else None,
         "last_timestamp_utc": valid_timestamps.max().isoformat() if not valid_timestamps.empty else None,
         "duplicate_rows_after_first": duplicate_rows_after_first,
@@ -225,16 +289,19 @@ def analyze_dataset(
         "duplicate_timestamps": duplicate_rows_after_first,
         "non_monotonic_rows": int(valid_timestamps.diff().lt(pd.Timedelta(0)).sum()),
         "invalid_ohlc_rows": invalid_ohlc_rows,
+        "invalid_timestamp_rows": invalid_timestamp_rows,
         "nan_ohlc_values": nan_total,
         "negative_volume_rows": negative_volume,
+        "zero_or_negative_prices": zero_or_negative,
+        "crossed_quotes": crossed_quotes,
         "volume_semantics": "UNKNOWN",
         "gap_distribution": gap_distribution,
         "largest_gaps": _largest_gaps(valid_timestamps),
         "status": "forensic_review_only",
-        "safe_for_forensic_use": invalid_ohlc_rows == 0 and negative_volume == 0,
+        "safe_for_forensic_use": invalid_ohlc_rows == 0 and negative_volume == 0 and crossed_quotes == 0 and invalid_timestamp_rows == 0,
         "notes": [
             "Raw observations are preserved without forward-filling or synthetic candle generation.",
-            "Duplicate timestamps are kept for Dukascopy raw tick observations and are not silently dropped.",
+            "Supplemental tick validation explicitly distinguishes epoch-millisecond timestamps from legacy OHLCV exports.",
             "Octa MT4 values are normalized from local UTC+3 provenance to internal UTC before use.",
             "The 15-minute Octa dataset is treated as a 15min source only and not coerced to a finer timeframe.",
             "No missing timestamps are filled or synthesized; timestamps are validated as-is from the originating raw file.",

@@ -59,7 +59,7 @@ def test_duplicate_and_gap_detection_preserves_raw_data():
 
     octa = analyze_dataset("data/raw/external_secondary/octa_mt4/XAU_15m_data.csv")
     assert octa["timeframe"] == "15min"
-    assert octa["gap_distribution"]
+    assert octa["gap_distribution"] == {}
     assert octa["duplicate_timestamps"] >= 0
     assert octa["non_monotonic_rows"] >= 0
 
