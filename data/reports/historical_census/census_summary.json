@@ -1,0 +1,20 @@
+{
+  "classification": "SMOKE_CENSUS",
+  "coverage": {
+    "source": "dukascopy",
+    "timeframe": "5min",
+    "rows": 3,
+    "start": "2022-01-01T00:00:00+00:00",
+    "end": "2022-01-01T00:10:00+00:00",
+    "duration_minutes": 10,
+    "duration_hours": 0.167,
+    "duplicate_timestamps": 0,
+    "coverage_status": "INSUFFICIENT"
+  },
+  "valid_trade_count": 3,
+  "no_trade_count": 0,
+  "warnings": [
+    "Smoke census: historical coverage is insufficient for a full historical census. This result is only a causal observation pass over the available sample."
+  ],
+  "errors": []
+}

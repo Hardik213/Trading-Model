@@ -14,9 +14,26 @@ from typing import Any, Callable, Optional
 import pandas as pd
 
 from .automatic_evidence import build_automatic_evidence
+from .event_backtester import TradeDirection, TradePlan, simulate_trade
 from .historical_sniper_replay import HistoricalPrecisionReplay, PrecisionReplayResult
+from .mss import Direction, normalize_direction
 from .replay_engine import ReplayConfig
 
+
+def serialize_trade_plan(plan: TradePlan) -> dict[str, Any]:
+    """Serialize the canonical immutable TradePlan into a deterministic JSON shape."""
+    return {
+        "trade_id": plan.trade_id,
+        "entry_time": plan.entry_time.isoformat(),
+        "direction": plan.direction.value,
+        "entry_price": float(plan.entry_price),
+        "stop_price": float(plan.stop_price),
+        "target_price": float(plan.target_price),
+        "planned_r": float(plan.planned_r),
+    }
+
+
+CANONICAL_HISTORICAL_CENSUS_DIR = "data/reports/historical_census"
 
 HISTORICAL_CENSUS_MIN_ROWS = 1000
 HISTORICAL_CENSUS_MIN_DURATION_MINUTES = 7 * 24 * 60
@@ -235,11 +252,124 @@ def run_census(
     return result, report
 
 
+def _trade_direction_for(direction: Optional[Direction]) -> Optional[TradeDirection]:
+    if direction is None:
+        return None
+    return TradeDirection.LONG if normalize_direction(direction) is Direction.BULLISH else TradeDirection.SHORT
+
+
+def _decision_id_for(obs) -> str:
+    ts = pd.Timestamp(obs.timestamp)
+    return f"decision_{ts.strftime('%Y%m%d%H%M%S')}_{getattr(obs, 'state', 'UNKNOWN').lower()}"
+
+
+def _build_trade_plan(obs, *, data: pd.DataFrame) -> Optional[TradePlan]:
+    if obs.state != "VALID":
+        return None
+    evidence = getattr(obs, "evidence", None)
+    if evidence is None:
+        return None
+
+    direction = evidence.direction
+    if direction is None:
+        return None
+    trade_direction = _trade_direction_for(direction)
+    entry = evidence.entry_price
+    invalidation = evidence.invalidation_price
+    target = evidence.target_price
+    if entry is None or invalidation is None or target is None or trade_direction is None:
+        return None
+
+    return TradePlan(
+        trade_id=f"trade_{pd.Timestamp(obs.timestamp).strftime('%Y%m%d%H%M%S')}_{trade_direction.value.lower()}",
+        entry_time=pd.Timestamp(obs.timestamp),
+        direction=trade_direction,
+        entry_price=float(entry),
+        stop_price=float(invalidation),
+        target_price=float(target),
+        planned_r=float(obs.planned_r) if obs.planned_r is not None else abs(float(target) - float(entry)) / abs(float(entry) - float(invalidation)),
+    )
+
+
+def _trade_outcome_record(plan: TradePlan, data: pd.DataFrame) -> dict[str, Any]:
+    result = simulate_trade(data, plan)
+    return {
+        "trade_id": plan.trade_id,
+        "entry_time": plan.entry_time.isoformat(),
+        "direction": plan.direction.value,
+        "outcome": result.outcome.value,
+        "exit_time": result.exit_time.isoformat() if result.exit_time is not None else None,
+        "entry_price": plan.entry_price,
+        "exit_price": result.exit_price,
+        "gross_r": result.gross_r,
+        "net_r": result.net_r,
+        "mfe_r": result.mfe_r,
+        "mae_r": result.mae_r,
+        "bars_held": result.bars_held,
+        "reason": result.reason,
+    }
+
+
+def _decision_record(obs, *, source: str, include_outcome: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    decision_time = {
+        "timestamp_utc": pd.Timestamp(obs.timestamp).isoformat(),
+        "classification": obs.state,
+        "reason": obs.reason,
+        "detail": obs.detail,
+        "planned_r": obs.planned_r,
+        "causal_cutoff_timestamp": pd.Timestamp(obs.timestamp).isoformat(),
+    }
+    payload = {
+        "decision_id": _decision_id_for(obs),
+        "timestamp_utc": decision_time["timestamp_utc"],
+        "classification": decision_time["classification"],
+        "reason": decision_time["reason"],
+        "detail": decision_time["detail"],
+        "planned_r": decision_time["planned_r"],
+        "source_dataset": source,
+        "causal_cutoff_timestamp": decision_time["causal_cutoff_timestamp"],
+        "decision_time": decision_time,
+    }
+    if include_outcome is not None:
+        payload["post_decision_outcome"] = include_outcome
+    return payload
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, "item") and not isinstance(value, (pd.Timestamp, pd.Timedelta)):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, pd.Timedelta):
+        return value.total_seconds()
+    return value
+
+
+def _json_safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(payload)
+    trade_plan_objects = safe.get("trade_plan_objects", [])
+    if trade_plan_objects:
+        safe["trade_plan_objects"] = [serialize_trade_plan(plan) for plan in trade_plan_objects]
+    for key in ("trade_plans", "trade_outcomes", "observations", "decision_records", "setup_records", "no_trade_records"):
+        if key in safe:
+            safe[key] = _json_safe(safe[key])
+    return safe
+
+
 def build_historical_census(
     data: pd.DataFrame | str | Path,
     *,
     evidence_builder: Optional[Callable] = None,
-    output_dir: str | Path = "data/reports/historical_census",
+    output_dir: str | Path = CANONICAL_HISTORICAL_CENSUS_DIR,
     timeframe: str = "5min",
     source: str = "dukascopy",
     min_planned_r: Optional[float] = None,
@@ -261,6 +391,35 @@ def build_historical_census(
             source=source,
             min_planned_r=min_planned_r,
         )
+        trade_plans = []
+        trade_outcomes = []
+        trade_plan_objects: list[TradePlan] = []
+        decision_records: list[dict[str, Any]] = []
+        setup_records: list[dict[str, Any]] = []
+        no_trade_records: list[dict[str, Any]] = []
+
+        for obs in result.observations:
+            decision_records.append(
+                _decision_record(obs, source=source)
+            )
+            if obs.state == "NO_TRADE":
+                no_trade_records.append(_decision_record(obs, source=source))
+            elif obs.state == "VALID":
+                plan = _build_trade_plan(obs, data=replay_frame)
+                if plan is None:
+                    continue
+                trade_plan_objects.append(plan)
+                trade_plans.append(serialize_trade_plan(plan))
+                outcome = _trade_outcome_record(plan, replay_frame)
+                trade_outcomes.append(outcome)
+                decision_snapshot = _decision_record(obs, source=source)
+                setup_records.append({
+                    "decision_id": decision_snapshot["decision_id"],
+                    "decision_time": decision_snapshot["decision_time"],
+                    "trade_plan": serialize_trade_plan(plan),
+                    "post_decision_outcome": outcome,
+                })
+
         payload: dict[str, Any] = {
             "classification": classification,
             "coverage": coverage,
@@ -275,12 +434,19 @@ def build_historical_census(
                 }
                 for obs in result.observations
             ],
+            "trade_plan_objects": trade_plan_objects,
+            "trade_plans": trade_plans,
+            "trade_outcomes": trade_outcomes,
+            "valid_trade_count": len(trade_outcomes),
             "warning": (
                 "Smoke census: historical coverage is insufficient for a full historical census. "
                 "This result is only a causal observation pass over the available sample."
                 if classification == "SMOKE_CENSUS"
                 else None
             ),
+            "decision_records": decision_records,
+            "setup_records": setup_records,
+            "no_trade_records": no_trade_records,
         }
     except Exception as exc:  # pragma: no cover - fail-closed safety path
         payload = {
@@ -288,20 +454,107 @@ def build_historical_census(
             "coverage": coverage,
             "report": None,
             "observations": [],
+            "trade_plan_objects": [],
+            "trade_plans": [],
+            "trade_outcomes": [],
+            "valid_trade_count": 0,
             "warning": (
                 "Smoke census: the frozen evidence builder could not evaluate the available sample safely, "
                 f"so the pipeline stopped without claiming historical completeness ({type(exc).__name__}: {exc})."
             ),
             "error": f"{type(exc).__name__}: {exc}",
+            "decision_records": [],
+            "setup_records": [],
+            "no_trade_records": [],
         }
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    manifest = {
+        "instrument": "XAUUSD",
+        "source": source,
+        "timeframe": timeframe,
+        "classification": payload["classification"],
+        "counts": {
+            "observations": len(payload.get("observations", [])),
+            "valid_trade_count": payload.get("valid_trade_count", 0),
+            "no_trade_records": len(payload.get("no_trade_records", [])),
+        },
+        "artifacts": [
+            "census_manifest.json",
+            "census_coverage.md",
+            "census_decisions.jsonl",
+            "census_setups.jsonl",
+            "census_no_trade.jsonl",
+            "census_summary.json",
+            "census_summary.md",
+        ],
+        "warning": payload.get("warning"),
+        "error": payload.get("error"),
+    }
+    coverage_md = (
+        "# Historical Census Coverage\n\n"
+        f"- Classification: {payload['classification']}\n"
+        f"- Source: {source}\n"
+        f"- Timeframe: {timeframe}\n"
+        f"- Rows: {coverage.get('rows', 0)}\n"
+        f"- Start: {coverage.get('start')}\n"
+        f"- End: {coverage.get('end')}\n"
+        f"- Duration minutes: {coverage.get('duration_minutes', 0)}\n"
+    )
+    summary_md = (
+        "# Historical Census Summary\n\n"
+        f"- Classification: {payload['classification']}\n"
+        f"- Valid setups: {payload.get('valid_trade_count', 0)}\n"
+        f"- No-trade records: {len(payload.get('no_trade_records', []))}\n"
+        f"- Observation count: {len(payload.get('observations', []))}\n"
+        f"- Warning: {payload.get('warning') or 'None'}\n"
+    )
+
+    safe_payload = _json_safe_payload(payload)
+    (out_dir / "summary.json").write_text(json.dumps(safe_payload, indent=2), encoding="utf-8")
     (out_dir / "decision_records.json").write_text(
         json.dumps(payload["observations"], indent=2),
         encoding="utf-8",
     )
+    (out_dir / "trade_plans.json").write_text(
+        json.dumps(payload["trade_plans"], indent=2),
+        encoding="utf-8",
+    )
+    (out_dir / "trade_outcomes.json").write_text(
+        json.dumps(_json_safe(payload["trade_outcomes"]), indent=2),
+        encoding="utf-8",
+    )
+    (out_dir / "decision_records.jsonl").write_text(
+        "\n".join(json.dumps(_json_safe(item)) for item in payload.get("observations", [])) + ("\n" if payload.get("observations") else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "census_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (out_dir / "census_coverage.md").write_text(coverage_md, encoding="utf-8")
+    (out_dir / "census_decisions.jsonl").write_text(
+        "\n".join(json.dumps(_json_safe(item)) for item in payload.get("decision_records", [])) + ("\n" if payload.get("decision_records") else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "census_setups.jsonl").write_text(
+        "\n".join(json.dumps(_json_safe(item)) for item in payload.get("setup_records", [])) + ("\n" if payload.get("setup_records") else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "census_no_trade.jsonl").write_text(
+        "\n".join(json.dumps(_json_safe(item)) for item in payload.get("no_trade_records", [])) + ("\n" if payload.get("no_trade_records") else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "census_summary.json").write_text(
+        json.dumps({
+            "classification": payload["classification"],
+            "coverage": coverage,
+            "valid_trade_count": payload.get("valid_trade_count", 0),
+            "no_trade_count": len(payload.get("no_trade_records", [])),
+            "warnings": [payload.get("warning")] if payload.get("warning") else [],
+            "errors": [payload.get("error")] if payload.get("error") else [],
+        }, indent=2),
+        encoding="utf-8",
+    )
+    (out_dir / "census_summary.md").write_text(summary_md, encoding="utf-8")
     return payload
 
 

@@ -61,6 +61,31 @@ def _last_close(df: pd.DataFrame) -> Optional[float]:
     return float(df.iloc[-1]["Close"])
 
 
+def _canonical_liquidity_event(event) -> Optional[object]:
+    """Return the canonical LiquidityEvent, regardless of wrapper shape.
+
+    Older consumers sometimes passed a CausalLiquidityEvidence wrapper, while the
+    canonical market-structure type is a direct LiquidityEvent. This helper keeps
+    the call site compatible with both shapes without redefining the liquidity
+    semantics themselves.
+    """
+    if event is None:
+        return None
+
+    if hasattr(event, "level") and hasattr(event, "outcome"):
+        return event
+
+    for attr in ("breach", "liquidity_event", "event"):
+        nested = getattr(event, attr, None)
+        if nested is None:
+            continue
+        canonical = _canonical_liquidity_event(nested)
+        if canonical is not None:
+            return canonical
+
+    return event
+
+
 def _event_confirmation(event) -> Optional[pd.Timestamp]:
     return getattr(event, "confirmation_timestamp", None)
 
@@ -133,10 +158,15 @@ def _structural_invalidation(
 ) -> Optional[float]:
     if evidence_event is None:
         return None
+    canonical = _canonical_liquidity_event(evidence_event)
+    if canonical is None:
+        return None
     # Conservative structural invalidation: the rejected liquidity level.
     # This is not an execution recommendation; it is a deterministic candidate
     # boundary for the research gate.
-    level = evidence_event.breach.level
+    level = getattr(canonical, "level", None)
+    if level is None:
+        return None
     return float(level.price)
 
 
@@ -206,7 +236,7 @@ def build_automatic_evidence(
         equal_tolerance=cfg.equal_tolerance,
     )
     draw_level: Optional[LiquidityLevel] = draw.level if draw is not None else None
-    liquidity_event = liquidity.breach if liquidity is not None else None
+    liquidity_event = _canonical_liquidity_event(liquidity.breach if liquidity is not None else None)
 
     if liquidity_event is None:
         return AutomaticEvidenceResult(
@@ -222,7 +252,7 @@ def build_automatic_evidence(
 
     # Search only bars after the rejection resolution. The visible slice itself
     # prevents future leakage.
-    resolution = liquidity_event.resolution_timestamp or liquidity_event.breach_timestamp
+    resolution = getattr(liquidity_event, "resolution_timestamp", None) or getattr(liquidity_event, "breach_timestamp", None)
     start_pos = int(df.index.searchsorted(pd.Timestamp(resolution), side="right"))
     candidate_positions = range(
         start_pos,

@@ -44,6 +44,19 @@ class LiquidityEvidenceKind(str, Enum):
     ACCEPTANCE = "ACCEPTANCE"
 
 
+def _canonical_liquidity_event(event) -> Optional[LiquidityEvent]:
+    if event is None:
+        return None
+    if isinstance(event, LiquidityEvent):
+        return event
+    for attr in ("breach", "liquidity_event", "event"):
+        nested = getattr(event, attr, None)
+        canonical = _canonical_liquidity_event(nested)
+        if canonical is not None:
+            return canonical
+    return None
+
+
 @dataclass(frozen=True)
 class CausalLiquidityEvidence:
     """One liquidity observation whose information set is valid at ``as_of``."""
@@ -55,11 +68,14 @@ class CausalLiquidityEvidence:
 
     @property
     def confirmed(self) -> bool:
-        if self.kind is LiquidityEvidenceKind.BREACH:
-            return pd.Timestamp(self.breach.breach_timestamp) < self.as_of
-        if self.breach.resolution_timestamp is None:
+        event = _canonical_liquidity_event(self.breach)
+        if event is None:
             return False
-        return pd.Timestamp(self.breach.resolution_timestamp) < self.as_of
+        if self.kind is LiquidityEvidenceKind.BREACH:
+            return pd.Timestamp(event.breach_timestamp) < self.as_of
+        if event.resolution_timestamp is None:
+            return False
+        return pd.Timestamp(event.resolution_timestamp) < self.as_of
 
     @property
     def is_rejection(self) -> bool:
@@ -242,7 +258,8 @@ def latest_reversal_liquidity(
     return max(
         candidates,
         key=lambda item: pd.Timestamp(
-            item.breach.resolution_timestamp or item.breach.breach_timestamp
+            (_canonical_liquidity_event(item.breach).resolution_timestamp
+             or _canonical_liquidity_event(item.breach).breach_timestamp)
         ),
     )
 

@@ -1,0 +1,22 @@
+{
+  "instrument": "XAUUSD",
+  "source": "dukascopy",
+  "timeframe": "5min",
+  "classification": "SMOKE_CENSUS",
+  "counts": {
+    "observations": 3,
+    "valid_trade_count": 3,
+    "no_trade_records": 0
+  },
+  "artifacts": [
+    "census_manifest.json",
+    "census_coverage.md",
+    "census_decisions.jsonl",
+    "census_setups.jsonl",
+    "census_no_trade.jsonl",
+    "census_summary.json",
+    "census_summary.md"
+  ],
+  "warning": "Smoke census: historical coverage is insufficient for a full historical census. This result is only a causal observation pass over the available sample.",
+  "error": null
+}

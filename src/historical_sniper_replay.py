@@ -31,6 +31,7 @@ class PrecisionReplayObservation:
     reason: str
     detail: str
     planned_r: Optional[float]
+    evidence: Optional[PrecisionEvidence] = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class HistoricalPrecisionReplay:
                     reason=decision.reason.value,
                     detail=decision.detail,
                     planned_r=decision.planned_r,
+                    evidence=evidence,
                 )
             )
             # The replay engine only needs a timestamp-validated observation.
