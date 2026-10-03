@@ -93,6 +93,23 @@ class ICT2022StrategyAdapter:
                 reason="Directional evidence has not yet been established.",
             )
 
+        liquidity_event = evidence.liquidity_event
+        if liquidity_event is not None:
+            liquidity_available = (
+                liquidity_event.availability_timestamp
+                or liquidity_event.resolution_timestamp
+            )
+            if (
+                liquidity_available is not None
+                and pd.Timestamp(liquidity_available) > pd.Timestamp(evidence.timestamp)
+            ):
+                return AdapterDecision(
+                    timestamp=evidence.timestamp,
+                    state=SetupState.DEVELOPING,
+                    direction=evidence.direction,
+                    reason="Liquidity confirmation is not yet available.",
+                )
+
         machine = ICT2022StateMachine()
 
         context_decision = machine.identify_context(

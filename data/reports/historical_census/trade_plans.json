@@ -1,14 +1,5 @@
 [
   {
-    "trade_id": "trade_20220101000000_long",
-    "entry_time": "2022-01-01T00:00:00+00:00",
-    "direction": "LONG",
-    "entry_price": 101.0,
-    "stop_price": 99.0,
-    "target_price": 109.0,
-    "planned_r": 4.0
-  },
-  {
     "trade_id": "trade_20220101000500_long",
     "entry_time": "2022-01-01T00:05:00+00:00",
     "direction": "LONG",
@@ -20,6 +11,15 @@
   {
     "trade_id": "trade_20220101001000_long",
     "entry_time": "2022-01-01T00:10:00+00:00",
+    "direction": "LONG",
+    "entry_price": 101.0,
+    "stop_price": 99.0,
+    "target_price": 109.0,
+    "planned_r": 4.0
+  },
+  {
+    "trade_id": "trade_20220101001500_long",
+    "entry_time": "2022-01-01T00:15:00+00:00",
     "direction": "LONG",
     "entry_price": 101.0,
     "stop_price": 99.0,

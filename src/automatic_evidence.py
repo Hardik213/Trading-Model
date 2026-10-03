@@ -17,6 +17,7 @@ from typing import Optional
 import pandas as pd
 
 from .causal_liquidity import (
+    _visible_bars_as_of,
     draw_on_liquidity,
     latest_reversal_liquidity,
 )
@@ -52,7 +53,7 @@ class AutomaticEvidenceResult:
 
 
 def _visible(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
-    return df.loc[df.index <= as_of].copy()
+    return _visible_bars_as_of(df, as_of)
 
 
 def _last_close(df: pd.DataFrame) -> Optional[float]:
@@ -218,7 +219,9 @@ def build_automatic_evidence(
         event, direction = max(
             choices,
             key=lambda x: pd.Timestamp(
-                x[0].breach.resolution_timestamp or x[0].breach.breach_timestamp
+                x[0].breach.availability_timestamp
+                or x[0].breach.resolution_timestamp
+                or x[0].breach.breach_timestamp
             ),
         )
 

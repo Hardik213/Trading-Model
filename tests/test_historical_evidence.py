@@ -2,7 +2,13 @@ import pandas as pd
 
 from src.historical_evidence import HistoricalEvidenceProvider
 from src.phase9_runner import run_historical_strategy
-from src.replay_engine import HistoricalReplay, ReplayConfig
+from src.replay_engine import (
+    HistoricalReplay,
+    ReplayConfig,
+    ReplayDecision,
+    ReplayObservation,
+    assert_no_future_data,
+)
 from src.reference_detectors import reference_detector_bundle
 from src.timeframe_context import build_context
 from src.ict2022_engine import SetupState
@@ -37,21 +43,26 @@ def test_reference_provider_is_chronological():
 
     seen=[]
 
-    def wrapped(timestamp, visible_base, visible_context):
-        assert visible_base.index.max() <= timestamp
+    def callback(timestamp, visible_base, visible_context):
+        assert_no_future_data(visible_base,as_of=timestamp)
         for frame in visible_context.frames.values():
-            if len(frame):
-                assert frame.index.max() <= timestamp
+            assert_no_future_data(frame,as_of=timestamp)
+        evidence=provider.build(timestamp,visible_base,visible_context)
+        assert evidence.timestamp == timestamp
         seen.append(timestamp)
-        return provider.build(timestamp,visible_base,visible_context)
+        return ReplayObservation(
+            timestamp,
+            ReplayDecision.DEVELOPING,
+            "DEVELOPING",
+            "chronology test",
+        )
 
-    # Directly prove the provider can be called only with visible data.
-    for ts in replay.decision_times():
-        visible=replay.data.loc[replay.data.index<=ts]
-        context=build_context(visible,base_timeframe="5M",source="TEST")
-        wrapped(ts,visible,context)
+    replay.run(callback)
 
-    assert seen == list(df.index)
+    expected=df.index+pd.Timedelta(minutes=5)
+    assert replay.decision_times().tolist() == list(expected)
+    assert seen == list(expected)
+    assert pd.DatetimeIndex(seen).is_monotonic_increasing
 
 
 def test_phase9_runner_is_single_chronological_unit():

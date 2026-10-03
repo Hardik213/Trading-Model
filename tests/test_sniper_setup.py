@@ -60,6 +60,28 @@ def test_acceptance_invalidates_reversal():
     assert d.reason is GateReason.LIQUIDITY_ACCEPTED
 
 
+def test_delayed_liquidity_confirmation_is_not_visible_before_availability():
+    e = valid_evidence()
+    event = LiquidityEvent(
+        level=e.liquidity_event.level,
+        breach_timestamp=e.liquidity_event.breach_timestamp,
+        breach_price=e.liquidity_event.breach_price,
+        breach_depth=e.liquidity_event.breach_depth,
+        outcome=e.liquidity_event.outcome,
+        resolution_timestamp=ts(5),
+        resolution_price=e.liquidity_event.resolution_price,
+        availability_timestamp=ts(9),
+    )
+
+    d = evaluate_precision_setup(PrecisionEvidence(
+        e.as_of, e.direction, e.draw_on_liquidity, event, e.mss, e.pd_array,
+        e.entry_price, e.invalidation_price, e.target_price, e.target_liquidity,
+    ))
+
+    assert d.state is PrecisionState.DEVELOPING
+    assert d.reason is GateReason.FUTURE_LIQUIDITY_EVENT
+
+
 def test_wrong_pd_direction_invalid():
     e = valid_evidence()
     fvg = FVG(FVGDirection.BEARISH, e.pd_array.formation_timestamp, e.pd_array.confirmation_timestamp,

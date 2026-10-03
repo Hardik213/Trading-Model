@@ -16,7 +16,7 @@ before its confirmation/resolution timestamp.
 This is a research detector, not a trade signal generator.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Iterable, Optional
 
@@ -28,6 +28,7 @@ from .market_structure import (
     LiquidityLevel,
     LiquiditySide,
     SwingPoint,
+    _bar_availability_timestamp,
     detect_confirmed_swings,
     detect_liquidity_breach,
     latest_confirmed_liquidity,
@@ -36,6 +37,7 @@ from .market_structure import (
     validate_ohlc,
 )
 from .mss import Direction, normalize_direction
+from .timeframe_context import _nominal_close_times, bars_available_as_of
 
 
 class LiquidityEvidenceKind(str, Enum):
@@ -72,10 +74,14 @@ class CausalLiquidityEvidence:
         if event is None:
             return False
         if self.kind is LiquidityEvidenceKind.BREACH:
-            return pd.Timestamp(event.breach_timestamp) < self.as_of
+            breach_available = (
+                event.breach_availability_timestamp or event.breach_timestamp
+            )
+            return pd.Timestamp(breach_available) <= self.as_of
         if event.resolution_timestamp is None:
             return False
-        return pd.Timestamp(event.resolution_timestamp) < self.as_of
+        resolution_available = event.availability_timestamp or event.resolution_timestamp
+        return pd.Timestamp(resolution_available) <= self.as_of
 
     @property
     def is_rejection(self) -> bool:
@@ -102,6 +108,90 @@ def _as_of(value) -> pd.Timestamp:
     return ts
 
 
+def _visible_bars_as_of(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    availability_column = next(
+        (column for column in ("available_at", "availability_ts") if column in df.columns),
+        None,
+    )
+    availability_mode = df.attrs.get("availability_mode")
+    if (
+        availability_mode == "event_time"
+        and availability_column is None
+        and "interval_end" not in df.columns
+    ):
+        raise ValueError("Event-time availability metadata is missing from the OHLC frame.")
+    if availability_column is not None:
+        if not isinstance(df.index, pd.DatetimeIndex) or df.index.tz is None:
+            raise ValueError("Event-time OHLC labels must be timezone-aware datetimes.")
+        if not df.index.is_monotonic_increasing or df.index.has_duplicates:
+            raise ValueError("Event-time OHLC labels must be unique and ordered.")
+
+        available_at = pd.to_datetime(df[availability_column], utc=True, errors="raise")
+        if "available_at" in df.columns and "availability_ts" in df.columns:
+            availability_alias = pd.to_datetime(df["availability_ts"], utc=True, errors="raise")
+            matches = available_at.eq(availability_alias) | (
+                available_at.isna() & availability_alias.isna()
+            )
+            if not matches.all():
+                raise ValueError("available_at and availability_ts must match when both are provided.")
+
+        labels = df.index.tz_convert("UTC")
+        before_label = available_at.notna() & (available_at < labels)
+        if before_label.any():
+            raise ValueError("Bar availability cannot precede its timestamp label.")
+
+        timeframe = df.attrs.get("timeframe")
+        if "interval_end" in df.columns:
+            interval_end = pd.to_datetime(df["interval_end"], utc=True, errors="raise")
+            before_end = available_at.notna() & interval_end.notna() & (available_at < interval_end)
+            if before_end.any():
+                raise ValueError("Bar availability cannot precede its interval end.")
+            missing_end = available_at.notna() & interval_end.isna()
+        else:
+            missing_end = available_at.notna()
+
+        if timeframe is None and missing_end.any() and str(
+            df.attrs.get("bar_label", "left")
+        ).lower() != "right":
+            raise ValueError(
+                "Timeframe metadata or right-labeled bars are required to validate availability."
+            )
+        if timeframe is not None and missing_end.any():
+            nominal_close = _nominal_close_times(df, str(timeframe))
+            before_close = available_at.notna() & (available_at < nominal_close)
+            if before_close.any():
+                raise ValueError("Bar availability cannot precede its nominal close.")
+
+        if not available_at.dropna().is_monotonic_increasing:
+            raise ValueError("Bar availability timestamps must be non-decreasing.")
+
+    if (
+        availability_column is not None
+        or "interval_end" in df.columns
+        or availability_mode == "nominal_close_fallback"
+        or df.attrs.get("timeframe") is not None
+        or str(df.attrs.get("bar_label", "left")).lower() == "right"
+    ):
+        timeframe = df.attrs.get("timeframe")
+        if timeframe is None:
+            if availability_column is not None and "interval_end" not in df.columns:
+                raise ValueError(
+                    "Timeframe metadata is required when availability lacks interval_end."
+                )
+            timeframe = "1min"
+        return bars_available_as_of(
+            df,
+            as_of,
+            timeframe=str(timeframe or ""),
+        )
+
+    raise ValueError(
+        "Timeframe metadata or explicit right-labeled bars are required for causal liquidity queries."
+    )
+
+
 def confirmed_liquidity_map(
     df: pd.DataFrame,
     as_of,
@@ -113,8 +203,11 @@ def confirmed_liquidity_map(
     """Return only liquidity levels whose source swing is confirmed by ``as_of``."""
     validate_ohlc(df)
     ts = _as_of(as_of)
+    visible = _visible_bars_as_of(df, ts)
+    if visible.empty:
+        return []
     swings = detect_confirmed_swings(
-        df,
+        visible,
         left_bars=left_bars,
         right_bars=right_bars,
     )
@@ -123,9 +216,17 @@ def confirmed_liquidity_map(
         visible_swings,
         equal_tolerance=equal_tolerance,
     )
-    for level, swing in zip(levels, visible_swings):
-        object.__setattr__(level, "confirmation_timestamp", swing.confirmation_timestamp)
-    return levels
+    return [
+        replace(
+            level,
+            confirmation_timestamp=swing.confirmation_timestamp,
+            availability_timestamp=_bar_availability_timestamp(
+                visible,
+                visible.index.get_loc(swing.confirmation_timestamp),
+            ),
+        )
+        for level, swing in zip(levels, visible_swings)
+    ]
 
 
 def _candidate_breach(
@@ -136,7 +237,7 @@ def _candidate_breach(
     resolution_bars: int,
 ) -> Optional[LiquidityEvent]:
     """Find the latest fully-resolved breach of ``level`` visible at ``as_of``."""
-    visible = df.loc[df.index <= as_of]
+    visible = _visible_bars_as_of(df, as_of)
     if visible.empty:
         return None
 
@@ -148,7 +249,17 @@ def _candidate_breach(
     lower_bound = pd.Timestamp(level.timestamp)
     if confirmation_ts is not None:
         lower_bound = max(lower_bound, pd.Timestamp(confirmation_ts))
-    eligible = visible.loc[visible.index >= lower_bound]
+    eligible_positions = [
+        position
+        for position, label in enumerate(visible.index)
+        if label >= lower_bound
+        and (
+            level.availability_timestamp is None
+            or _bar_availability_timestamp(visible, position)
+            >= level.availability_timestamp
+        )
+    ]
+    eligible = visible.iloc[eligible_positions]
     if eligible.empty:
         return None
 
@@ -166,7 +277,8 @@ def _candidate_breach(
             continue
         # resolve_breach only sees ``eligible``.  Still explicitly enforce the
         # causal boundary so this function remains safe if the resolver changes.
-        if event.resolution_timestamp is not None and pd.Timestamp(event.resolution_timestamp) > as_of:
+        event_available = event.availability_timestamp or event.resolution_timestamp
+        if event_available is not None and pd.Timestamp(event_available) > as_of:
             continue
         return event
     return None
@@ -258,8 +370,9 @@ def latest_reversal_liquidity(
     return max(
         candidates,
         key=lambda item: pd.Timestamp(
-            (_canonical_liquidity_event(item.breach).resolution_timestamp
-             or _canonical_liquidity_event(item.breach).breach_timestamp)
+              (_canonical_liquidity_event(item.breach).availability_timestamp
+               or _canonical_liquidity_event(item.breach).resolution_timestamp
+               or _canonical_liquidity_event(item.breach).breach_timestamp)
         ),
     )
 
@@ -281,14 +394,14 @@ def draw_on_liquidity(
     """
     direction = normalize_direction(direction)
     ts = _as_of(as_of)
-    visible = df.loc[df.index <= ts]
+    visible = _visible_bars_as_of(df, ts)
     if visible.empty:
         return None
     if current_price is None:
         current_price = float(visible.iloc[-1]["Close"])
 
     levels = confirmed_liquidity_map(
-        df,
+        visible,
         ts,
         left_bars=left_bars,
         right_bars=right_bars,

@@ -66,4 +66,7 @@ def test_replay_result_preserves_chronology():
         provider=EmptyEvidenceProvider(),
     ).run()
 
-    assert [x.timestamp for x in result.observations] == list(base.index)
+    expected=base.index+pd.Timedelta(minutes=5)
+    timestamps=[x.timestamp for x in result.observations]
+    assert timestamps == list(expected)
+    assert pd.DatetimeIndex(timestamps).is_monotonic_increasing

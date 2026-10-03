@@ -110,6 +110,25 @@ def test_acceptance_is_no_trade():
     assert d.state is SetupState.NO_TRADE
 
 
+def test_unavailable_liquidity_confirmation_cannot_be_consumed():
+    event = rejection()
+    event = LiquidityEvent(
+        level=event.level,
+        breach_timestamp=event.breach_timestamp,
+        breach_price=event.breach_price,
+        breach_depth=event.breach_depth,
+        outcome=event.outcome,
+        resolution_timestamp=event.resolution_timestamp,
+        resolution_price=event.resolution_price,
+        availability_timestamp=ts(16),
+    )
+
+    decision = ICT2022StrategyAdapter().evaluate(evidence(liquidity_event=event))
+
+    assert decision.state is SetupState.DEVELOPING
+    assert "not yet available" in decision.reason
+
+
 def test_missing_mss_is_developing():
     d=ICT2022StrategyAdapter().evaluate(evidence(mss=None))
     assert d.state is SetupState.DEVELOPING

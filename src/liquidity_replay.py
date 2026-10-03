@@ -22,6 +22,7 @@ from .causal_liquidity import (
 )
 from .data_contract import normalize_ohlc
 from .replay_engine import ReplayConfig
+from .timeframe_context import _nominal_close_times, bars_available_as_of
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class LiquidityReplayObservation:
     draw_bearish_price: Optional[float]
     latest_rejection_side: Optional[str]
     latest_rejection_timestamp: Optional[pd.Timestamp]
+    latest_rejection_available_at: Optional[pd.Timestamp] = None
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,20 @@ class HistoricalLiquidityReplay:
         self.equal_tolerance = equal_tolerance
 
     def decision_times(self) -> pd.DatetimeIndex:
-        idx = self.data.index
+        eligible = pd.Series(True, index=self.data.index)
+        for column in ("historical_complete", "is_complete"):
+            if column in self.data.columns:
+                eligible &= self.data[column].fillna(False).astype(bool)
+
+        if "available_at" in self.data.columns:
+            eligible &= self.data["available_at"].notna()
+            idx = pd.DatetimeIndex(
+                self.data.loc[eligible, "available_at"].drop_duplicates()
+            ).sort_values()
+        else:
+            idx = _nominal_close_times(self.data, self.config.timeframe)
+            idx = idx[eligible.to_numpy()]
+
         if self.config.start is not None:
             idx = idx[idx >= self.config.start]
         if self.config.end is not None:
@@ -84,16 +99,22 @@ class HistoricalLiquidityReplay:
     def run(self) -> LiquidityReplayResult:
         records: list[LiquidityReplayObservation] = []
         for timestamp in self.decision_times():
-            visible = self.data.loc[self.data.index <= timestamp].copy()
-            levels = confirmed_liquidity_map(
+            visible = bars_available_as_of(
                 self.data,
+                timestamp,
+                timeframe=self.config.timeframe,
+            )
+            if visible.empty:
+                continue
+            levels = confirmed_liquidity_map(
+                visible,
                 timestamp,
                 left_bars=self.left_bars,
                 right_bars=self.right_bars,
                 equal_tolerance=self.equal_tolerance,
             )
             evidence = liquidity_evidence_as_of(
-                self.data,
+                visible,
                 timestamp,
                 left_bars=self.left_bars,
                 right_bars=self.right_bars,
@@ -104,7 +125,7 @@ class HistoricalLiquidityReplay:
             acceptances = [x for x in evidence if x.kind is LiquidityEvidenceKind.ACCEPTANCE]
             current_price = float(visible.iloc[-1]["Close"])
             bullish_draw = draw_on_liquidity(
-                self.data,
+                visible,
                 timestamp,
                 "BULLISH",
                 current_price=current_price,
@@ -113,7 +134,7 @@ class HistoricalLiquidityReplay:
                 equal_tolerance=self.equal_tolerance,
             )
             bearish_draw = draw_on_liquidity(
-                self.data,
+                visible,
                 timestamp,
                 "BEARISH",
                 current_price=current_price,
@@ -124,7 +145,9 @@ class HistoricalLiquidityReplay:
             latest = max(
                 rejections,
                 key=lambda x: pd.Timestamp(
-                    x.breach.resolution_timestamp or x.breach.breach_timestamp
+                    x.breach.availability_timestamp
+                    or x.breach.resolution_timestamp
+                    or x.breach.breach_timestamp
                 ),
                 default=None,
             )
@@ -139,6 +162,9 @@ class HistoricalLiquidityReplay:
                     latest_rejection_side=(latest.level.side.value if latest else None),
                     latest_rejection_timestamp=(
                         latest.breach.resolution_timestamp if latest else None
+                    ),
+                    latest_rejection_available_at=(
+                        latest.breach.availability_timestamp if latest else None
                     ),
                 )
             )
@@ -159,6 +185,11 @@ class HistoricalLiquidityReplay:
                 "latest_rejection_timestamp": (
                     x.latest_rejection_timestamp.isoformat()
                     if x.latest_rejection_timestamp is not None
+                    else None
+                ),
+                "latest_rejection_available_at": (
+                    x.latest_rejection_available_at.isoformat()
+                    if x.latest_rejection_available_at is not None
                     else None
                 ),
             }

@@ -46,15 +46,21 @@ class SwingPoint:
 
 @dataclass(frozen=True)
 class LiquidityLevel:
+    """A pool observed at ``timestamp``, confirmed later and available at its own event time."""
+
     timestamp: pd.Timestamp
     price: float
     side: LiquiditySide
     source: str
     strength: int = 1
+    confirmation_timestamp: Optional[pd.Timestamp] = None
+    availability_timestamp: Optional[pd.Timestamp] = None
 
 
 @dataclass(frozen=True)
 class LiquidityEvent:
+    """A breach and its first decisive close; availability timestamps are distinct from bar labels."""
+
     level: LiquidityLevel
     breach_timestamp: pd.Timestamp
     breach_price: float
@@ -62,6 +68,8 @@ class LiquidityEvent:
     outcome: BreachOutcome
     resolution_timestamp: Optional[pd.Timestamp] = None
     resolution_price: Optional[float] = None
+    availability_timestamp: Optional[pd.Timestamp] = None
+    breach_availability_timestamp: Optional[pd.Timestamp] = None
 
 
 def validate_ohlc(df: pd.DataFrame) -> None:
@@ -166,6 +174,7 @@ def swings_to_liquidity(
                     else LiquiditySide.SSL
                 ),
                 source="SWING",
+                confirmation_timestamp=s.confirmation_timestamp,
             )
         )
 
@@ -188,6 +197,8 @@ def swings_to_liquidity(
                 side=level.side,
                 source=level.source,
                 strength=strength,
+                confirmation_timestamp=level.confirmation_timestamp,
+                availability_timestamp=level.availability_timestamp,
             )
         )
     return out
@@ -203,6 +214,43 @@ def detect_liquidity_breach(
     return float(bar["Low"]) < level.price
 
 
+def _bar_is_complete(df: pd.DataFrame, position: int) -> bool:
+    row = df.iloc[position]
+    for column in ("historical_complete", "is_complete"):
+        if column in df.columns:
+            if pd.isna(row[column]) or not bool(row[column]):
+                return False
+    for column in ("available_at", "availability_ts"):
+        if column in df.columns and pd.isna(row[column]):
+            return False
+    return True
+
+
+def _bar_availability_timestamp(df: pd.DataFrame, position: int) -> pd.Timestamp:
+    row = df.iloc[position]
+    for column in ("available_at", "availability_ts", "interval_end"):
+        if column in df.columns and pd.notna(row[column]):
+            return pd.Timestamp(row[column])
+
+    if df.attrs.get("availability_mode") == "event_time":
+        raise ValueError("Event-time availability metadata is missing from the OHLC frame.")
+    bar_label = str(df.attrs.get("bar_label", "")).lower()
+    if bar_label not in {"left", "right"}:
+        raise ValueError("Explicit bar_label metadata is required for liquidity timing fallback.")
+    if df.index.tz is None:
+        raise ValueError("Timezone-aware bar labels are required for liquidity timing fallback.")
+    if bar_label == "right":
+        return pd.Timestamp(df.index[position])
+
+    timeframe = df.attrs.get("timeframe")
+    if timeframe is None:
+        raise ValueError("Timeframe metadata is required for left-labeled liquidity timing fallback.")
+
+    from .timeframe_context import _nominal_close_times
+
+    return pd.Timestamp(_nominal_close_times(df.iloc[[position]], str(timeframe))[0])
+
+
 def resolve_breach(
     df: pd.DataFrame,
     level: LiquidityLevel,
@@ -213,18 +261,36 @@ def resolve_breach(
     """
     Resolve the bars immediately following a breach.
 
-    Rejection:
-      BSL: price trades above the level, then a later close returns below it.
-      SSL: price trades below the level, then a later close returns above it.
-
-    Acceptance:
-      BSL: a later close remains above the level.
-      SSL: a later close remains below the level.
+        A close on the breach bar beyond the level is immediate acceptance, never
+        a sweep. Otherwise the first subsequent complete close beyond either side
+        resolves the event: back across the level is rejection; continuation beyond
+        it is acceptance. Rejection therefore always requires subsequent evidence.
 
     If neither condition is observed inside the resolution window, the event
     remains UNRESOLVED. A wick alone is therefore never labelled a sweep.
     """
     validate_ohlc(df)
+    availability_mode = df.attrs.get("availability_mode")
+    if availability_mode not in {None, "event_time", "nominal_close_fallback"}:
+        raise ValueError("Unsupported liquidity availability mode.")
+    has_timing_metadata = any(
+        column in df.columns
+        for column in ("available_at", "availability_ts", "interval_end")
+    ) or availability_mode == "event_time"
+    if has_timing_metadata:
+        if (
+            ("available_at" in df.columns or "availability_ts" in df.columns)
+            and "interval_end" not in df.columns
+            and df.attrs.get("timeframe") is None
+        ):
+            raise ValueError("Timeframe metadata is required to validate event-time liquidity bars.")
+        from .data_contract import normalize_ohlc
+
+        normalize_ohlc(
+            df,
+            timeframe=str(df.attrs.get("timeframe") or "1min"),
+            source=str(df.attrs.get("source", "UNKNOWN")),
+        )
     if breach_position < 0 or breach_position >= len(df):
         raise IndexError("breach_position is outside the dataframe.")
     if max_resolution_bars < 1:
@@ -233,58 +299,63 @@ def resolve_breach(
     bar = df.iloc[breach_position]
     breach_price = float(bar["High"] if level.side is LiquiditySide.BSL else bar["Low"])
     depth = abs(breach_price - level.price)
+    if not _bar_is_complete(df, breach_position):
+        return LiquidityEvent(
+            level, df.index[breach_position], breach_price, depth,
+            BreachOutcome.UNRESOLVED,
+        )
+    breach_availability = _bar_availability_timestamp(df, breach_position)
 
-    end = min(len(df), breach_position + 1 + max_resolution_bars)
+    close = float(bar["Close"])
+    if (level.side is LiquiditySide.BSL and close > level.price) or (
+        level.side is LiquiditySide.SSL and close < level.price
+    ):
+        return LiquidityEvent(
+            level=level,
+            breach_timestamp=df.index[breach_position],
+            breach_price=breach_price,
+            breach_depth=depth,
+            outcome=BreachOutcome.ACCEPTANCE,
+            resolution_timestamp=df.index[breach_position],
+            resolution_price=close,
+            availability_timestamp=breach_availability,
+            breach_availability_timestamp=breach_availability,
+        )
 
-    for j in range(breach_position + 1, end):
-        row = df.iloc[j]
-        close = float(row["Close"])
+    resolution_positions = []
+    for position in range(breach_position + 1, len(df)):
+        if _bar_is_complete(df, position):
+            resolution_positions.append(position)
+            if len(resolution_positions) == max_resolution_bars:
+                break
 
-        if level.side is LiquiditySide.BSL and close < level.price:
-            return LiquidityEvent(
-                level=level,
-                breach_timestamp=df.index[breach_position],
-                breach_price=breach_price,
-                breach_depth=depth,
-                outcome=BreachOutcome.REJECTION,
-                resolution_timestamp=df.index[j],
-                resolution_price=close,
-            )
-
-        if level.side is LiquiditySide.SSL and close > level.price:
-            return LiquidityEvent(
-                level=level,
-                breach_timestamp=df.index[breach_position],
-                breach_price=breach_price,
-                breach_depth=depth,
-                outcome=BreachOutcome.REJECTION,
-                resolution_timestamp=df.index[j],
-                resolution_price=close,
-            )
-
-    # Only classify acceptance if a close beyond the level is observed.
-    for j in range(breach_position, end):
-        close = float(df.iloc[j]["Close"])
-        if level.side is LiquiditySide.BSL and close > level.price:
-            return LiquidityEvent(
-                level=level,
-                breach_timestamp=df.index[breach_position],
-                breach_price=breach_price,
-                breach_depth=depth,
-                outcome=BreachOutcome.ACCEPTANCE,
-                resolution_timestamp=df.index[j],
-                resolution_price=close,
-            )
-        if level.side is LiquiditySide.SSL and close < level.price:
-            return LiquidityEvent(
-                level=level,
-                breach_timestamp=df.index[breach_position],
-                breach_price=breach_price,
-                breach_depth=depth,
-                outcome=BreachOutcome.ACCEPTANCE,
-                resolution_timestamp=df.index[j],
-                resolution_price=close,
-            )
+    for position in resolution_positions:
+        close = float(df.iloc[position]["Close"])
+        if level.side is LiquiditySide.BSL:
+            if close < level.price:
+                outcome = BreachOutcome.REJECTION
+            elif close > level.price:
+                outcome = BreachOutcome.ACCEPTANCE
+            else:
+                continue
+        else:
+            if close > level.price:
+                outcome = BreachOutcome.REJECTION
+            elif close < level.price:
+                outcome = BreachOutcome.ACCEPTANCE
+            else:
+                continue
+        return LiquidityEvent(
+            level=level,
+            breach_timestamp=df.index[breach_position],
+            breach_price=breach_price,
+            breach_depth=depth,
+            outcome=outcome,
+            resolution_timestamp=df.index[position],
+            resolution_price=close,
+            availability_timestamp=_bar_availability_timestamp(df, position),
+            breach_availability_timestamp=breach_availability,
+        )
 
     return LiquidityEvent(
         level=level,
@@ -292,6 +363,7 @@ def resolve_breach(
         breach_price=breach_price,
         breach_depth=depth,
         outcome=BreachOutcome.UNRESOLVED,
+        breach_availability_timestamp=breach_availability,
     )
 
 

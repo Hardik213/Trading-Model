@@ -15,8 +15,8 @@
     "instrument": "XAUUSD",
     "source": "dukascopy",
     "timeframe": "5min",
-    "start": "2022-01-01T00:00:00+00:00",
-    "end": "2022-01-01T00:10:00+00:00",
+    "start": "2022-01-01T00:05:00+00:00",
+    "end": "2022-01-01T00:15:00+00:00",
     "observations": 3,
     "state_counts": {
       "VALID": 3,
@@ -31,13 +31,6 @@
   },
   "observations": [
     {
-      "timestamp": "2022-01-01T00:00:00+00:00",
-      "state": "VALID",
-      "reason": "VALID_SEQUENCE",
-      "detail": "All causal ICT-2022 precision gates are satisfied.",
-      "planned_r": 4.0
-    },
-    {
       "timestamp": "2022-01-01T00:05:00+00:00",
       "state": "VALID",
       "reason": "VALID_SEQUENCE",
@@ -50,18 +43,16 @@
       "reason": "VALID_SEQUENCE",
       "detail": "All causal ICT-2022 precision gates are satisfied.",
       "planned_r": 4.0
+    },
+    {
+      "timestamp": "2022-01-01T00:15:00+00:00",
+      "state": "VALID",
+      "reason": "VALID_SEQUENCE",
+      "detail": "All causal ICT-2022 precision gates are satisfied.",
+      "planned_r": 4.0
     }
   ],
   "trade_plan_objects": [
-    {
-      "trade_id": "trade_20220101000000_long",
-      "entry_time": "2022-01-01T00:00:00+00:00",
-      "direction": "LONG",
-      "entry_price": 101.0,
-      "stop_price": 99.0,
-      "target_price": 109.0,
-      "planned_r": 4.0
-    },
     {
       "trade_id": "trade_20220101000500_long",
       "entry_time": "2022-01-01T00:05:00+00:00",
@@ -74,6 +65,15 @@
     {
       "trade_id": "trade_20220101001000_long",
       "entry_time": "2022-01-01T00:10:00+00:00",
+      "direction": "LONG",
+      "entry_price": 101.0,
+      "stop_price": 99.0,
+      "target_price": 109.0,
+      "planned_r": 4.0
+    },
+    {
+      "trade_id": "trade_20220101001500_long",
+      "entry_time": "2022-01-01T00:15:00+00:00",
       "direction": "LONG",
       "entry_price": 101.0,
       "stop_price": 99.0,
@@ -83,15 +83,6 @@
   ],
   "trade_plans": [
     {
-      "trade_id": "trade_20220101000000_long",
-      "entry_time": "2022-01-01T00:00:00+00:00",
-      "direction": "LONG",
-      "entry_price": 101.0,
-      "stop_price": 99.0,
-      "target_price": 109.0,
-      "planned_r": 4.0
-    },
-    {
       "trade_id": "trade_20220101000500_long",
       "entry_time": "2022-01-01T00:05:00+00:00",
       "direction": "LONG",
@@ -108,24 +99,18 @@
       "stop_price": 99.0,
       "target_price": 109.0,
       "planned_r": 4.0
+    },
+    {
+      "trade_id": "trade_20220101001500_long",
+      "entry_time": "2022-01-01T00:15:00+00:00",
+      "direction": "LONG",
+      "entry_price": 101.0,
+      "stop_price": 99.0,
+      "target_price": 109.0,
+      "planned_r": 4.0
     }
   ],
   "trade_outcomes": [
-    {
-      "trade_id": "trade_20220101000000_long",
-      "entry_time": "2022-01-01T00:00:00+00:00",
-      "direction": "LONG",
-      "outcome": "STOP",
-      "exit_time": "2022-01-01T00:00:00+00:00",
-      "entry_price": 101.0,
-      "exit_price": 99.0,
-      "gross_r": -1.0,
-      "net_r": -1.0,
-      "mfe_r": 2.0,
-      "mae_r": -2.0,
-      "bars_held": 1,
-      "reason": "Structural invalidation was reached before target."
-    },
     {
       "trade_id": "trade_20220101000500_long",
       "entry_time": "2022-01-01T00:05:00+00:00",
@@ -155,29 +140,26 @@
       "mae_r": 0.0,
       "bars_held": 1,
       "reason": "Neither target nor structural invalidation was reached within the test horizon."
+    },
+    {
+      "trade_id": "trade_20220101001500_long",
+      "entry_time": "2022-01-01T00:15:00+00:00",
+      "direction": "LONG",
+      "outcome": "EXPIRED",
+      "exit_time": null,
+      "entry_price": 101.0,
+      "exit_price": null,
+      "gross_r": null,
+      "net_r": null,
+      "mfe_r": null,
+      "mae_r": null,
+      "bars_held": 0,
+      "reason": "No candle exists at or after entry_time."
     }
   ],
   "valid_trade_count": 3,
   "warning": "Smoke census: historical coverage is insufficient for a full historical census. This result is only a causal observation pass over the available sample.",
   "decision_records": [
-    {
-      "decision_id": "decision_20220101000000_valid",
-      "timestamp_utc": "2022-01-01T00:00:00+00:00",
-      "classification": "VALID",
-      "reason": "VALID_SEQUENCE",
-      "detail": "All causal ICT-2022 precision gates are satisfied.",
-      "planned_r": 4.0,
-      "source_dataset": "dukascopy",
-      "causal_cutoff_timestamp": "2022-01-01T00:00:00+00:00",
-      "decision_time": {
-        "timestamp_utc": "2022-01-01T00:00:00+00:00",
-        "classification": "VALID",
-        "reason": "VALID_SEQUENCE",
-        "detail": "All causal ICT-2022 precision gates are satisfied.",
-        "planned_r": 4.0,
-        "causal_cutoff_timestamp": "2022-01-01T00:00:00+00:00"
-      }
-    },
     {
       "decision_id": "decision_20220101000500_valid",
       "timestamp_utc": "2022-01-01T00:05:00+00:00",
@@ -213,44 +195,27 @@
         "planned_r": 4.0,
         "causal_cutoff_timestamp": "2022-01-01T00:10:00+00:00"
       }
-    }
-  ],
-  "setup_records": [
+    },
     {
-      "decision_id": "decision_20220101000000_valid",
+      "decision_id": "decision_20220101001500_valid",
+      "timestamp_utc": "2022-01-01T00:15:00+00:00",
+      "classification": "VALID",
+      "reason": "VALID_SEQUENCE",
+      "detail": "All causal ICT-2022 precision gates are satisfied.",
+      "planned_r": 4.0,
+      "source_dataset": "dukascopy",
+      "causal_cutoff_timestamp": "2022-01-01T00:15:00+00:00",
       "decision_time": {
-        "timestamp_utc": "2022-01-01T00:00:00+00:00",
+        "timestamp_utc": "2022-01-01T00:15:00+00:00",
         "classification": "VALID",
         "reason": "VALID_SEQUENCE",
         "detail": "All causal ICT-2022 precision gates are satisfied.",
         "planned_r": 4.0,
-        "causal_cutoff_timestamp": "2022-01-01T00:00:00+00:00"
-      },
-      "trade_plan": {
-        "trade_id": "trade_20220101000000_long",
-        "entry_time": "2022-01-01T00:00:00+00:00",
-        "direction": "LONG",
-        "entry_price": 101.0,
-        "stop_price": 99.0,
-        "target_price": 109.0,
-        "planned_r": 4.0
-      },
-      "post_decision_outcome": {
-        "trade_id": "trade_20220101000000_long",
-        "entry_time": "2022-01-01T00:00:00+00:00",
-        "direction": "LONG",
-        "outcome": "STOP",
-        "exit_time": "2022-01-01T00:00:00+00:00",
-        "entry_price": 101.0,
-        "exit_price": 99.0,
-        "gross_r": -1.0,
-        "net_r": -1.0,
-        "mfe_r": 2.0,
-        "mae_r": -2.0,
-        "bars_held": 1,
-        "reason": "Structural invalidation was reached before target."
+        "causal_cutoff_timestamp": "2022-01-01T00:15:00+00:00"
       }
-    },
+    }
+  ],
+  "setup_records": [
     {
       "decision_id": "decision_20220101000500_valid",
       "decision_time": {
@@ -319,6 +284,41 @@
         "mae_r": 0.0,
         "bars_held": 1,
         "reason": "Neither target nor structural invalidation was reached within the test horizon."
+      }
+    },
+    {
+      "decision_id": "decision_20220101001500_valid",
+      "decision_time": {
+        "timestamp_utc": "2022-01-01T00:15:00+00:00",
+        "classification": "VALID",
+        "reason": "VALID_SEQUENCE",
+        "detail": "All causal ICT-2022 precision gates are satisfied.",
+        "planned_r": 4.0,
+        "causal_cutoff_timestamp": "2022-01-01T00:15:00+00:00"
+      },
+      "trade_plan": {
+        "trade_id": "trade_20220101001500_long",
+        "entry_time": "2022-01-01T00:15:00+00:00",
+        "direction": "LONG",
+        "entry_price": 101.0,
+        "stop_price": 99.0,
+        "target_price": 109.0,
+        "planned_r": 4.0
+      },
+      "post_decision_outcome": {
+        "trade_id": "trade_20220101001500_long",
+        "entry_time": "2022-01-01T00:15:00+00:00",
+        "direction": "LONG",
+        "outcome": "EXPIRED",
+        "exit_time": null,
+        "entry_price": 101.0,
+        "exit_price": null,
+        "gross_r": null,
+        "net_r": null,
+        "mfe_r": null,
+        "mae_r": null,
+        "bars_held": 0,
+        "reason": "No candle exists at or after entry_time."
       }
     }
   ],

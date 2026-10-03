@@ -22,14 +22,14 @@ df = load_market_data(
 )
 
 enriched = add_technical_features(df)
-enriched = add_multitimeframe_features(enriched)
+enriched = add_multitimeframe_features(enriched, base=market_cfg["timeframe"])
 enriched = add_session_features(enriched)
 enriched = add_session_entry_filter(enriched, cfg.get('execution', {}).get('entry_windows') or None)
-enriched = add_liquidity_features(enriched)
+enriched = add_liquidity_features(enriched, timeframe=market_cfg["timeframe"])
 enriched = add_multitimeframe_regime(enriched)
 enriched = add_macro_features(enriched)
 
-enriched[FEATURE_COLUMNS] = enriched[FEATURE_COLUMNS].replace([float('inf'), float('-inf')], float('nan')).fillna(0.0)
+enriched[FEATURE_COLUMNS] = enriched[FEATURE_COLUMNS].replace([float('inf'), float('-inf')], float('nan'))
 X, y = build_training_frame(enriched, horizon=model_cfg['horizon'], threshold=model_cfg['threshold'])
 model = train_signal_model(X, y)
 probs = predict_probabilities(model, X)

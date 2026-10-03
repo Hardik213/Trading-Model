@@ -278,6 +278,27 @@ def test_census_same_bar_stop_and_target_is_ambiguous(tmp_path):
 
     payload = build_historical_census(df, evidence_builder=builder, output_dir=tmp_path, timeframe="5min", source="dukascopy")
     assert payload["trade_outcomes"]
+    assert payload["trade_outcomes"][0]["outcome"] == TradeOutcome.EXPIRED.value
+
+
+def test_census_post_decision_bar_stop_and_target_is_ambiguous(tmp_path):
+    idx = pd.date_range("2022-01-01T00:00:00Z", periods=2, freq="5min")
+    df = pd.DataFrame(
+        {
+            "Open": [100.0, 100.0],
+            "High": [105.0, 105.0],
+            "Low": [97.0, 97.0],
+            "Close": [101.0, 101.0],
+        },
+        index=idx,
+    )
+
+    def builder(ts, base, context):
+        return _valid_trade_evidence_same_bar(ts)
+
+    payload = build_historical_census(df, evidence_builder=builder, output_dir=tmp_path, timeframe="5min", source="dukascopy")
+    assert payload["trade_outcomes"]
+    assert payload["trade_outcomes"][0]["entry_time"] == "2022-01-01T00:05:00+00:00"
     assert payload["trade_outcomes"][0]["outcome"] == TradeOutcome.AMBIGUOUS.value
 
 

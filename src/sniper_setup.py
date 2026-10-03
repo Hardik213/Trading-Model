@@ -158,7 +158,8 @@ def evaluate_precision_setup(
     if event.level.side is not reversal_side:
         return PrecisionDecision(PrecisionState.INVALID, GateReason.LIQUIDITY_SIDE_MISMATCH,
                                  "Rejected liquidity does not oppose the proposed reversal.")
-    if not _visible(event.resolution_timestamp, as_of):
+    confirmation_available = event.availability_timestamp or event.resolution_timestamp
+    if not _visible(confirmation_available, as_of):
         return PrecisionDecision(PrecisionState.DEVELOPING, GateReason.FUTURE_LIQUIDITY_EVENT,
                                  "Liquidity rejection confirmation is not yet visible.")
 

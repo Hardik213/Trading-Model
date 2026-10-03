@@ -1,5 +1,6 @@
 import pandas as pd
 from src.automatic_evidence import EvidenceBuildConfig, build_automatic_evidence
+from src.data_contract import normalize_ohlc
 
 
 def _bars(n=40):
@@ -14,7 +15,11 @@ def _bars(n=40):
         l = min(o, c) - 0.02
         rows.append((o,h,l,c))
         price = c
-    return pd.DataFrame(rows, index=idx, columns=["Open","High","Low","Close"])
+    result = pd.DataFrame(rows, index=idx, columns=["Open","High","Low","Close"])
+    result.attrs["timeframe"] = "5min"
+    result.attrs["bar_label"] = "left"
+    result.attrs["availability_mode"] = "nominal_close_fallback"
+    return result
 
 
 def test_empty_visible_data_is_developing_evidence():
@@ -43,3 +48,48 @@ def test_builder_rejects_missing_post_mss_array_in_safe_configuration(monkeypatc
     ts = df.index[-1]
     result = ae.build_automatic_evidence(ts, df, None)
     assert result.reason == "NO_CONFIRMED_LIQUIDITY_REJECTION"
+
+
+def test_builder_filters_event_time_and_incomplete_bars(monkeypatch):
+    import src.automatic_evidence as ae
+
+    df=_bars(n=3)
+    df["interval_end"]=df.index+pd.Timedelta(minutes=5)
+    df["available_at"]=pd.to_datetime(
+        ["2026-01-01T00:05:00Z","2026-01-01T00:12:30Z",None],utc=True
+    )
+    df["historical_complete"]=[True,True,False]
+    df["is_complete"]=[True,True,False]
+    df.attrs["availability_mode"]="event_time"
+    observed=[]
+
+    def no_reversal(visible,*args,**kwargs):
+        observed.append(tuple(visible.index))
+        return None
+
+    monkeypatch.setattr(ae,"latest_reversal_liquidity",no_reversal)
+
+    early=build_automatic_evidence(pd.Timestamp("2026-01-01T00:10:00Z"),df,None)
+    assert early.reason == "NO_CONFIRMED_LIQUIDITY_REJECTION"
+    assert observed == [(df.index[0],),(df.index[0],)]
+
+    observed.clear()
+    exact=build_automatic_evidence(pd.Timestamp("2026-01-01T00:12:30Z"),df,None)
+    assert exact.reason == "NO_CONFIRMED_LIQUIDITY_REJECTION"
+    assert observed == [(df.index[0],df.index[1]),(df.index[0],df.index[1])]
+
+
+def test_builder_uses_nominal_close_for_normalized_fallback(monkeypatch):
+    import src.automatic_evidence as ae
+
+    df=normalize_ohlc(_bars(n=3),timeframe="5M",source="TEST")
+    observed=[]
+
+    def no_reversal(visible,*args,**kwargs):
+        observed.append(tuple(visible.index))
+        return None
+
+    monkeypatch.setattr(ae,"latest_reversal_liquidity",no_reversal)
+
+    build_automatic_evidence(pd.Timestamp("2026-01-01T00:11:00Z"),df,None)
+    assert observed == [(df.index[0],df.index[1]),(df.index[0],df.index[1])]
