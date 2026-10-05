@@ -7,6 +7,8 @@ from typing import Any, Optional
 import json
 import pandas as pd
 
+from .replay_subject import ReplaySubject
+
 
 class DecisionClass(str, Enum):
     VALID = "VALID"
@@ -39,6 +41,7 @@ class TradeJournalRecord:
     news_state: Optional[str]
     decision_class: DecisionClass
     notes: Optional[str] = None
+    replay_subject: Optional[ReplaySubject] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -51,6 +54,10 @@ class TradeJournalRecord:
         data = asdict(self)
         data["decision_time"] = self.decision_time.isoformat()
         data["decision_class"] = self.decision_class.value
+        if self.replay_subject is None:
+            data.pop("replay_subject")
+        else:
+            data["replay_subject"] = self.replay_subject.to_dict()
         return data
 
 
@@ -68,10 +75,15 @@ class NoTradeRecord:
     regime: Optional[str] = None
     news_state: Optional[str] = None
     notes: Optional[str] = None
+    replay_subject: Optional[ReplaySubject] = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["decision_time"] = self.decision_time.isoformat()
+        if self.replay_subject is None:
+            data.pop("replay_subject")
+        else:
+            data["replay_subject"] = self.replay_subject.to_dict()
         return data
 
 

@@ -17,6 +17,8 @@ from typing import Optional
 
 import pandas as pd
 
+from .replay_subject import ReplaySubject
+
 
 class TradeDirection(str, Enum):
     LONG = "LONG"
@@ -42,6 +44,7 @@ class TradePlan:
     spread: float = 0.0
     commission: float = 0.0
     slippage: float = 0.0
+    replay_subject: Optional[ReplaySubject] = None
 
     def __post_init__(self) -> None:
         risk = self.risk_distance
@@ -95,6 +98,7 @@ class TradeResult:
     mae_r: Optional[float]
     bars_held: int
     reason: str
+    replay_subject: Optional[ReplaySubject] = None
 
 
 def _mfe_mae(
@@ -165,7 +169,8 @@ def simulate_trade(
         return TradeResult(
             plan.trade_id, plan.entry_time, None, plan.direction,
             TradeOutcome.EXPIRED, plan.entry_price, None, None, None,
-            None, None, 0, "No candle exists at or after entry_time."
+            None, None, 0, "No candle exists at or after entry_time.",
+            plan.replay_subject,
         )
 
     end = len(path) - 1
@@ -192,7 +197,8 @@ def simulate_trade(
                 plan.trade_id, plan.entry_time, path.index[i], plan.direction,
                 TradeOutcome.AMBIGUOUS, plan.entry_price, None, None, None,
                 mfe, mae, i - positions + 1,
-                "Both target and stop were touched in one OHLC bar; order is unknowable."
+                "Both target and stop were touched in one OHLC bar; order is unknowable.",
+                plan.replay_subject,
             )
 
         if hit_stop:
@@ -204,7 +210,8 @@ def simulate_trade(
                 plan.trade_id, plan.entry_time, path.index[i], plan.direction,
                 TradeOutcome.STOP, plan.entry_price, exit_price, gross, net,
                 mfe, mae, i - positions + 1,
-                "Structural invalidation was reached before target."
+                "Structural invalidation was reached before target.",
+                plan.replay_subject,
             )
 
         if hit_target:
@@ -216,7 +223,8 @@ def simulate_trade(
                 plan.trade_id, plan.entry_time, path.index[i], plan.direction,
                 TradeOutcome.TARGET, plan.entry_price, exit_price, gross, net,
                 mfe, mae, i - positions + 1,
-                "Declared opposing-liquidity target was reached before stop."
+                "Declared opposing-liquidity target was reached before stop.",
+                plan.replay_subject,
             )
 
     mfe, mae = _mfe_mae(plan, path, positions, end)
@@ -224,5 +232,6 @@ def simulate_trade(
         plan.trade_id, plan.entry_time, None, plan.direction,
         TradeOutcome.EXPIRED, plan.entry_price, None, None, None,
         mfe, mae, end - positions + 1,
-        "Neither target nor structural invalidation was reached within the test horizon."
+        "Neither target nor structural invalidation was reached within the test horizon.",
+        plan.replay_subject,
     )

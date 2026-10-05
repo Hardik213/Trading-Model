@@ -12,6 +12,8 @@ from src.replay_engine import (
     ReplayDecision,
     ReplayObservation,
 )
+from src.replay_subject import ReplaySubject
+from src.sniper_setup import PrecisionEvidence
 from src.timeframe_context import TimeframeContext
 
 
@@ -64,6 +66,29 @@ def _replay(
 
 def _observation(timestamp, _base, _context):
     return ReplayObservation(timestamp, ReplayDecision.DEVELOPING, "DEVELOPING", "test")
+
+
+def test_replay_subject_identity_is_utc_hashable_and_round_trips():
+    first = ReplaySubject(
+        pd.Timestamp("2026-01-01T10:05:17-05:00"),
+        _ts("2026-01-01T10:01:00Z"),
+    )
+    second = ReplaySubject(
+        _ts("2026-01-01T15:05:17Z"),
+        _ts("2026-01-01T10:02:00Z"),
+    )
+
+    assert first.availability_timestamp == second.availability_timestamp
+    assert first.availability_timestamp.tz == pd.Timestamp("2026-01-01T00:00:00Z").tz
+    assert first != second
+    assert len({first, second}) == 2
+    assert first.subject_id != second.subject_id
+    assert ReplaySubject.from_dict(first.to_dict()) == first
+    with pytest.raises(ValueError, match="later than availability"):
+        ReplaySubject(
+            first.availability_timestamp,
+            first.availability_timestamp + pd.Timedelta(minutes=1),
+        )
 
 
 def test_empty_lifecycle_and_finish_rejects_future_input():
@@ -148,7 +173,7 @@ def test_batch_and_incremental_snapshots_match_within_declared_window():
         pd.testing.assert_frame_equal(batch_base, incremental_base, check_dtype=False)
         pd.testing.assert_frame_equal(batch_context, incremental_context, check_dtype=False)
 
-def test_one_decision_for_atomic_group_with_multiple_bars_and_timeframes():
+def test_multiple_decisions_for_atomic_group_with_multiple_bars_and_timeframes():
     replay = _replay()
     timestamp = "2026-01-01T00:07:00Z"
     replay.feed_group(_group(
@@ -170,17 +195,169 @@ def test_one_decision_for_atomic_group_with_multiple_bars_and_timeframes():
         },
     ))
     seen = []
-    result = replay.process_next(lambda ts, base, context: (
+    callback = lambda ts, base, context: (
         seen.append((ts, base.index.tolist(), context.frames["5min"].index.tolist()))
         or _observation(ts, base, context)
-    ))
-    assert result is not None
-    assert seen == [(
-        _ts(timestamp),
-        [_ts("2026-01-01T00:00:00Z"), _ts("2026-01-01T00:01:00Z")],
-        [_ts("2026-01-01T00:00:00Z")],
-    )]
+    )
+    first = replay.process_next(callback)
+    second = replay.process_next(callback)
+    assert first is not None and first.timestamp == _ts(timestamp)
+    assert second is not None and second.timestamp == _ts(timestamp)
+    assert seen == [
+        (_ts(timestamp), [_ts("2026-01-01T00:00:00Z")], [_ts("2026-01-01T00:00:00Z")]),
+        (
+            _ts(timestamp),
+            [_ts("2026-01-01T00:00:00Z"), _ts("2026-01-01T00:01:00Z")],
+            [_ts("2026-01-01T00:00:00Z")],
+        ),
+    ]
     assert replay.process_next(_observation) is None
+
+
+def test_five_delayed_bars_keep_actual_availability_as_callback_timestamp():
+    replay = _replay()
+    prior_available = "2026-01-01T10:00:00Z"
+    replay.feed_group(_group(
+        prior_available,
+        **{"1min": (_bar("2026-01-01T09:59:00Z", prior_available),)},
+    ))
+    available = "2026-01-01T10:05:17Z"
+    base_bars = tuple(
+        _bar(f"2026-01-01T10:0{minute}:00Z", available)
+        for minute in range(0, 5)
+    )
+    replay.feed_group(_group(
+        available,
+        **{
+            "1min": base_bars,
+            "5min": (
+                _bar(
+                    "2026-01-01T10:00:00Z",
+                    available,
+                    timeframe="5min",
+                    interval="5min",
+                ),
+            ),
+        },
+    ))
+
+    seen = []
+    evidence_as_of = []
+    observations = []
+
+    def callback(ts, base, context):
+        seen.append((ts, base.copy(), context.frames["5min"].copy(), context.replay_subject))
+        evidence_as_of.append(PrecisionEvidence(
+            as_of=ts,
+            direction=None,
+            draw_on_liquidity=None,
+            liquidity_event=None,
+            mss=None,
+            pd_array=None,
+            entry_price=None,
+            invalidation_price=None,
+            target_price=None,
+            target_liquidity=None,
+            replay_subject=context.replay_subject,
+        ))
+        return _observation(ts, base, context)
+
+    prior = replay.process_next(callback)
+    assert prior is not None and prior.timestamp == _ts(prior_available)
+    observations.append(prior)
+    assert prior.replay_subject == seen[0][3]
+    assert seen[0][0] == _ts(prior_available)
+    assert seen[0][1].index.tolist() == [_ts("2026-01-01T09:59:00Z")]
+    assert seen[0][2].empty
+
+    for _ in range(5):
+        observation = replay.process_next(callback)
+        assert observation is not None and observation.timestamp == _ts(available)
+        assert observation.replay_subject is not None
+        assert observation.replay_subject.availability_timestamp == observation.timestamp
+        observations.append(observation)
+    assert replay.process_next(_observation) is None
+    assert [item[0] for item in seen[1:]] == [_ts(available)] * 5
+    subjects = [item[3] for item in seen[1:]]
+    assert [subject.base_bar_timestamp for subject in subjects] == [
+        _ts(f"2026-01-01T10:0{minute}:00Z") for minute in range(5)
+    ]
+    assert all(subject.availability_timestamp == _ts(available) for subject in subjects)
+    assert len(set(subjects)) == 5
+    assert len({observation.timestamp for observation in observations[1:]}) == 1
+    assert len({observation.replay_subject for observation in observations[1:]}) == 5
+    assert [len(item[1]) for item in seen[1:]] == [2, 3, 4, 5, 6]
+    assert [item[2].index.tolist() for item in seen[1:]] == [
+        [_ts("2026-01-01T10:00:00Z")]
+    ] * 5
+    delayed_subjects = set(subjects)
+    assert delayed_subjects.isdisjoint(seen[0][1].index)
+    for timestamp, base, higher, _subject in seen:
+        assert (base["available_at"] <= timestamp).all()
+        if "available_at" in higher:
+            assert (higher["available_at"] <= timestamp).all()
+    assert [evidence.as_of for evidence in evidence_as_of[1:]] == [_ts(available)] * 5
+    assert [evidence.replay_subject for evidence in evidence_as_of[1:]] == subjects
+
+
+def test_multi_bar_group_with_no_eligible_decisions_is_skipped():
+    replay = _replay()
+    available = "2026-01-01T00:05:00Z"
+    replay.feed_group(_group(
+        available,
+        **{
+            "1min": tuple(
+                _bar(
+                    f"2026-01-01T00:0{minute}:00Z",
+                    available,
+                    complete=False,
+                )
+                for minute in range(3)
+            )
+        },
+    ))
+
+    calls = []
+    assert replay.process_next(lambda *args: calls.append(args)) is None
+    assert calls == []
+    assert replay.retained_bar_counts == {"1min": 0, "5min": 0}
+
+
+def test_multi_decision_group_transitions_to_next_availability_group():
+    replay = _replay()
+    first_available = "2026-01-01T00:03:00Z"
+    replay.feed_group(_group(
+        first_available,
+        **{
+            "1min": tuple(
+                _bar(f"2026-01-01T00:0{minute}:00Z", first_available)
+                for minute in range(3)
+            )
+        },
+    ))
+    next_available = "2026-01-01T00:04:00Z"
+    replay.feed_group(_group(
+        next_available,
+        **{
+            "1min": (
+                _bar("2026-01-01T00:03:00Z", next_available),
+            )
+        },
+    ))
+
+    seen = []
+    for _ in range(4):
+        observation = replay.process_next(lambda ts, base, context: (
+            seen.append(ts) or _observation(ts, base, context)
+        ))
+        assert observation is not None
+    assert replay.process_next(_observation) is None
+    assert seen == [
+        _ts(first_available),
+        _ts(first_available),
+        _ts(first_available),
+        _ts(next_available),
+    ]
 
 
 def test_multiple_groups_may_queue_but_are_processed_in_availability_order():

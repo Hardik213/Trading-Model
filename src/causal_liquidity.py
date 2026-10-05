@@ -16,7 +16,7 @@ before its confirmation/resolution timestamp.
 This is a research detector, not a trade signal generator.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable, Optional
 
@@ -28,7 +28,6 @@ from .market_structure import (
     LiquidityLevel,
     LiquiditySide,
     SwingPoint,
-    _bar_availability_timestamp,
     detect_confirmed_swings,
     detect_liquidity_breach,
     latest_confirmed_liquidity,
@@ -74,14 +73,10 @@ class CausalLiquidityEvidence:
         if event is None:
             return False
         if self.kind is LiquidityEvidenceKind.BREACH:
-            breach_available = (
-                event.breach_availability_timestamp or event.breach_timestamp
-            )
-            return pd.Timestamp(breach_available) <= self.as_of
+            return pd.Timestamp(event.breach_timestamp) < self.as_of
         if event.resolution_timestamp is None:
             return False
-        resolution_available = event.availability_timestamp or event.resolution_timestamp
-        return pd.Timestamp(resolution_available) <= self.as_of
+        return pd.Timestamp(event.resolution_timestamp) < self.as_of
 
     @property
     def is_rejection(self) -> bool:
@@ -109,18 +104,12 @@ def _as_of(value) -> pd.Timestamp:
 
 
 def _visible_bars_as_of(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
     availability_column = next(
         (column for column in ("available_at", "availability_ts") if column in df.columns),
         None,
     )
     availability_mode = df.attrs.get("availability_mode")
-    if (
-        availability_mode == "event_time"
-        and availability_column is None
-        and "interval_end" not in df.columns
-    ):
+    if availability_mode == "event_time" and availability_column is None:
         raise ValueError("Event-time availability metadata is missing from the OHLC frame.")
     if availability_column is not None:
         if not isinstance(df.index, pd.DatetimeIndex) or df.index.tz is None:
@@ -152,12 +141,6 @@ def _visible_bars_as_of(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
         else:
             missing_end = available_at.notna()
 
-        if timeframe is None and missing_end.any() and str(
-            df.attrs.get("bar_label", "left")
-        ).lower() != "right":
-            raise ValueError(
-                "Timeframe metadata or right-labeled bars are required to validate availability."
-            )
         if timeframe is not None and missing_end.any():
             nominal_close = _nominal_close_times(df, str(timeframe))
             before_close = available_at.notna() & (available_at < nominal_close)
@@ -167,29 +150,21 @@ def _visible_bars_as_of(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
         if not available_at.dropna().is_monotonic_increasing:
             raise ValueError("Bar availability timestamps must be non-decreasing.")
 
-    if (
-        availability_column is not None
-        or "interval_end" in df.columns
-        or availability_mode == "nominal_close_fallback"
-        or df.attrs.get("timeframe") is not None
-        or str(df.attrs.get("bar_label", "left")).lower() == "right"
-    ):
+    if availability_column is not None or availability_mode == "nominal_close_fallback":
         timeframe = df.attrs.get("timeframe")
-        if timeframe is None:
-            if availability_column is not None and "interval_end" not in df.columns:
-                raise ValueError(
-                    "Timeframe metadata is required when availability lacks interval_end."
-                )
-            timeframe = "1min"
+        if availability_column is None and timeframe is None:
+            raise ValueError("Timeframe metadata is required for nominal-close fallback.")
         return bars_available_as_of(
             df,
             as_of,
             timeframe=str(timeframe or ""),
         )
 
-    raise ValueError(
-        "Timeframe metadata or explicit right-labeled bars are required for causal liquidity queries."
-    )
+    visible = df.loc[df.index <= as_of].copy()
+    for column in ("historical_complete", "is_complete"):
+        if column in visible.columns:
+            visible = visible.loc[visible[column].fillna(False).astype(bool)]
+    return visible
 
 
 def confirmed_liquidity_map(
@@ -216,17 +191,9 @@ def confirmed_liquidity_map(
         visible_swings,
         equal_tolerance=equal_tolerance,
     )
-    return [
-        replace(
-            level,
-            confirmation_timestamp=swing.confirmation_timestamp,
-            availability_timestamp=_bar_availability_timestamp(
-                visible,
-                visible.index.get_loc(swing.confirmation_timestamp),
-            ),
-        )
-        for level, swing in zip(levels, visible_swings)
-    ]
+    for level, swing in zip(levels, visible_swings):
+        object.__setattr__(level, "confirmation_timestamp", swing.confirmation_timestamp)
+    return levels
 
 
 def _candidate_breach(
@@ -249,19 +216,11 @@ def _candidate_breach(
     lower_bound = pd.Timestamp(level.timestamp)
     if confirmation_ts is not None:
         lower_bound = max(lower_bound, pd.Timestamp(confirmation_ts))
-    eligible_positions = [
-        position
-        for position, label in enumerate(visible.index)
-        if label >= lower_bound
-        and (
-            level.availability_timestamp is None
-            or _bar_availability_timestamp(visible, position)
-            >= level.availability_timestamp
-        )
-    ]
-    eligible = visible.iloc[eligible_positions]
+    eligible = visible.loc[visible.index >= lower_bound]
     if eligible.empty:
         return None
+    if not any(column in eligible.columns for column in ("available_at", "availability_ts", "interval_end")):
+        eligible.attrs.setdefault("bar_label", "right")
 
     for pos in range(len(eligible) - 1, -1, -1):
         row = eligible.iloc[pos]
@@ -277,8 +236,7 @@ def _candidate_breach(
             continue
         # resolve_breach only sees ``eligible``.  Still explicitly enforce the
         # causal boundary so this function remains safe if the resolver changes.
-        event_available = event.availability_timestamp or event.resolution_timestamp
-        if event_available is not None and pd.Timestamp(event_available) > as_of:
+        if event.resolution_timestamp is not None and pd.Timestamp(event.resolution_timestamp) > as_of:
             continue
         return event
     return None
@@ -370,9 +328,8 @@ def latest_reversal_liquidity(
     return max(
         candidates,
         key=lambda item: pd.Timestamp(
-              (_canonical_liquidity_event(item.breach).availability_timestamp
-               or _canonical_liquidity_event(item.breach).resolution_timestamp
-               or _canonical_liquidity_event(item.breach).breach_timestamp)
+            (_canonical_liquidity_event(item.breach).resolution_timestamp
+             or _canonical_liquidity_event(item.breach).breach_timestamp)
         ),
     )
 

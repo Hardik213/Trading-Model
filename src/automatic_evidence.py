@@ -188,10 +188,15 @@ def build_automatic_evidence(
     """
     cfg = config or EvidenceBuildConfig()
     as_of = pd.Timestamp(timestamp)
+    if visible_context is None:
+        visible_context = TimeframeContext(frames={})
     df = _visible(visible_base, as_of)
     if df.empty:
         return AutomaticEvidenceResult(
-            PrecisionEvidence(as_of, None, None, None, None, None, None, None, None, None),
+            PrecisionEvidence(
+                as_of, None, None, None, None, None, None, None, None, None,
+                visible_context.replay_subject,
+            ),
             "EMPTY_VISIBLE_DATA",
         )
 
@@ -213,7 +218,10 @@ def build_automatic_evidence(
         choices = [(e, d) for e, d in choices if e is not None]
         if not choices:
             return AutomaticEvidenceResult(
-                PrecisionEvidence(as_of, None, None, None, None, None, None, None, None, None),
+                PrecisionEvidence(
+                    as_of, None, None, None, None, None, None, None, None, None,
+                    visible_context.replay_subject,
+                ),
                 "NO_CONFIRMED_LIQUIDITY_REJECTION",
             )
         event, direction = max(
@@ -243,7 +251,10 @@ def build_automatic_evidence(
 
     if liquidity_event is None:
         return AutomaticEvidenceResult(
-            PrecisionEvidence(as_of, direction, draw_level, None, None, None, None, None, None, None),
+            PrecisionEvidence(
+                as_of, direction, draw_level, None, None, None, None, None, None, None,
+                visible_context.replay_subject,
+            ),
             "LIQUIDITY_REJECTION_NOT_CONFIRMED",
         )
 
@@ -301,7 +312,10 @@ def build_automatic_evidence(
 
     if mss is None:
         return AutomaticEvidenceResult(
-            PrecisionEvidence(as_of, direction, draw_level, liquidity_event, None, None, None, None, None, None),
+            PrecisionEvidence(
+                as_of, direction, draw_level, liquidity_event, None, None, None, None, None, None,
+                visible_context.replay_subject,
+            ),
             "NO_CAUSALLY_CONFIRMED_MSS",
         )
 
@@ -312,14 +326,20 @@ def build_automatic_evidence(
 
     if fvg is None:
         return AutomaticEvidenceResult(
-            PrecisionEvidence(as_of, direction, draw_level, liquidity_event, mss, None, None, None, None, None),
+            PrecisionEvidence(
+                as_of, direction, draw_level, liquidity_event, mss, None, None, None, None, None,
+                visible_context.replay_subject,
+            ),
             "NO_POST_MSS_FVG",
         )
 
     entry = _find_retracement_entry(df, fvg, as_of=as_of, direction=direction)
     if entry is None:
         return AutomaticEvidenceResult(
-            PrecisionEvidence(as_of, direction, draw_level, liquidity_event, mss, fvg, None, None, None, None),
+            PrecisionEvidence(
+                as_of, direction, draw_level, liquidity_event, mss, fvg, None, None, None, None,
+                visible_context.replay_subject,
+            ),
             "NO_RETRACEMENT_IN_PD_ARRAY",
         )
 
@@ -338,6 +358,7 @@ def build_automatic_evidence(
             invalidation_price=invalidation,
             target_price=target,
             target_liquidity=draw_level,
+            replay_subject=visible_context.replay_subject,
         ),
         "AUTOMATIC_EVIDENCE_BUILT",
     )

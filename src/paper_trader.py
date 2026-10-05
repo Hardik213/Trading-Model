@@ -10,13 +10,7 @@ import yaml
 from src.backtest import run_backtest
 from src.broker import BrokerFactory
 from src.data_loader import load_market_data
-from src.features import (
-    FEATURE_COLUMNS,
-    add_ict_features,
-    add_technical_features,
-    build_training_frame,
-    feature_row_eligibility_mask,
-)
+from src.features import FEATURE_COLUMNS, add_ict_features, add_technical_features, build_training_frame
 from src.liquidity import add_liquidity_features
 from src.macro import add_macro_features
 from src.models import predict_probabilities, train_signal_model
@@ -192,23 +186,19 @@ class PaperTrader:
 
         market_source = df.attrs.get("market_source", "unavailable")
         enriched = add_technical_features(df)
-        enriched = add_multitimeframe_features(enriched, base=market_cfg["timeframe"])
+        enriched = add_multitimeframe_features(enriched)
         enriched = add_session_features(enriched)
         enriched = add_session_entry_filter(enriched, self.config.get("execution", {}).get("entry_windows") or None)
-        enriched = add_liquidity_features(enriched, timeframe=market_cfg["timeframe"])
+        enriched = add_liquidity_features(enriched)
         enriched = add_multitimeframe_regime(enriched)
         enriched = add_macro_features(enriched)
         enriched = add_ict_features(enriched)
-        enriched[FEATURE_COLUMNS] = enriched[FEATURE_COLUMNS].replace([float("inf"), float("-inf")], float("nan"))
+        enriched[FEATURE_COLUMNS] = enriched[FEATURE_COLUMNS].replace([float("inf"), float("-inf")], float("nan")).fillna(0.0)
         X, y = build_training_frame(enriched, horizon=model_cfg["horizon"], threshold=model_cfg["threshold"])
         model = train_signal_model(X, y)
         probabilities = predict_probabilities(model, X)
         enriched["signal_probability"] = probabilities
-        enriched["signal"] = 0
-        decision_eligible = feature_row_eligibility_mask(enriched) & enriched["signal_probability"].notna()
-        enriched.loc[decision_eligible, "signal"] = enriched.loc[decision_eligible].apply(
-            lambda row: self._compose_signal(row, float(row["signal_probability"])), axis=1
-        )
+        enriched["signal"] = enriched.apply(lambda row: self._compose_signal(row, float(row["signal_probability"])), axis=1)
 
         latest = enriched.iloc[-1]
         decision = self._evaluate_ict_gate(latest, float(latest["signal_probability"]))
@@ -272,25 +262,21 @@ class PaperTrader:
             use_live_data=self.config["trading"].get("use_live_data", False),
         )
         enriched = add_technical_features(df)
-        enriched = add_multitimeframe_features(enriched, base=market_cfg["timeframe"])
+        enriched = add_multitimeframe_features(enriched)
         enriched = add_session_features(enriched)
         enriched = add_session_entry_filter(enriched, self.config.get("execution", {}).get("entry_windows") or None)
-        enriched = add_liquidity_features(enriched, timeframe=market_cfg["timeframe"])
+        enriched = add_liquidity_features(enriched)
         enriched = add_multitimeframe_regime(enriched)
         enriched = add_macro_features(enriched)
         enriched = add_ict_features(enriched)
 
-        enriched[FEATURE_COLUMNS] = enriched[FEATURE_COLUMNS].replace([float("inf"), float("-inf")], float("nan"))
+        enriched[FEATURE_COLUMNS] = enriched[FEATURE_COLUMNS].replace([float("inf"), float("-inf")], float("nan")).fillna(0.0)
         X, y = build_training_frame(enriched, horizon=model_cfg["horizon"], threshold=model_cfg["threshold"])
 
         model = train_signal_model(X, y)
         probabilities = predict_probabilities(model, X)
         enriched["signal_probability"] = probabilities
-        enriched["signal"] = 0
-        decision_eligible = feature_row_eligibility_mask(enriched) & enriched["signal_probability"].notna()
-        enriched.loc[decision_eligible, "signal"] = enriched.loc[decision_eligible].apply(
-            lambda row: self._compose_signal(row, float(row["signal_probability"])), axis=1
-        )
+        enriched["signal"] = enriched.apply(lambda row: self._compose_signal(row, float(row["signal_probability"])), axis=1)
 
         latest = enriched.iloc[-1]
         decision = self._evaluate_ict_gate(latest, float(latest["signal_probability"]))

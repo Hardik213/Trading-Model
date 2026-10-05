@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -7,6 +8,10 @@ import pytest
 from src.event_backtester import TradePlan, TradeOutcome, simulate_trade
 from src.historical_census import (
     CensusReport,
+    _build_trade_plan,
+    _decision_id_for,
+    _decision_record,
+    _trade_outcome_record,
     classify_coverage,
     summarize_data_coverage,
     build_historical_census,
@@ -17,6 +22,7 @@ from src.sniper_setup import PrecisionEvidence
 from src.displacement import Direction, DisplacementEvent
 from src.fvg import FVG, FVGDirection
 from src.mss import MSSEvent
+from src.replay_subject import ReplaySubject
 
 
 def _valid_trade_evidence(ts: pd.Timestamp) -> PrecisionEvidence:
@@ -147,6 +153,96 @@ def test_census_report_from_result():
     assert report.no_trade == 1
     assert report.developing == 1
     assert report.invalid == 1
+
+
+def test_subject_aware_census_ids_are_unique_and_batch_ids_stay_legacy():
+    availability = pd.Timestamp("2026-10-03T10:05:17Z")
+    evidence = SimpleNamespace(
+        direction=Direction.BULLISH,
+        entry_price=101.0,
+        invalidation_price=99.0,
+        target_price=105.0,
+        replay_subject=None,
+    )
+    subjects = [
+        ReplaySubject(availability, pd.Timestamp(f"2026-10-03T10:0{minute}:00Z"))
+        for minute in (1, 2)
+    ]
+    observations = [
+        SimpleNamespace(
+            timestamp=availability,
+            state="VALID",
+            reason="VALID_SEQUENCE",
+            detail="test",
+            planned_r=2.0,
+            evidence=evidence,
+            replay_subject=subject,
+        )
+        for subject in subjects
+    ]
+
+    decision_ids = [_decision_id_for(observation) for observation in observations]
+    plans = [_build_trade_plan(observation, data=pd.DataFrame()) for observation in observations]
+    assert len(set(decision_ids)) == 2
+    assert all(plan is not None for plan in plans)
+    assert len({plan.trade_id for plan in plans}) == 2
+    assert all(plan.entry_time == availability for plan in plans)
+    assert [serialize_trade_plan(plan)["replay_subject"] for plan in plans] == [
+        subject.to_dict() for subject in subjects
+    ]
+    assert [
+        _decision_record(observation, source="test")["replay_subject"]
+        for observation in observations
+    ] == [subject.to_dict() for subject in subjects]
+    empty_path = pd.DataFrame(
+        columns=["Open", "High", "Low", "Close"],
+        index=pd.DatetimeIndex([], tz="UTC"),
+    )
+    assert [
+        _trade_outcome_record(plan, empty_path)["replay_subject"]
+        for plan in plans
+    ] == [subject.to_dict() for subject in subjects]
+    evidence_only = SimpleNamespace(
+        direction=Direction.BULLISH,
+        entry_price=101.0,
+        invalidation_price=99.0,
+        target_price=105.0,
+        replay_subject=subjects[0],
+    )
+    observation_without_subject = SimpleNamespace(
+        timestamp=availability,
+        state="VALID",
+        reason="VALID_SEQUENCE",
+        detail="test",
+        planned_r=2.0,
+        evidence=evidence_only,
+    )
+    assert _decision_id_for(observation_without_subject) == decision_ids[0]
+    evidence_only_plan = _build_trade_plan(observation_without_subject, data=pd.DataFrame())
+    assert evidence_only_plan is not None
+    assert evidence_only_plan.trade_id == plans[0].trade_id
+
+    legacy = SimpleNamespace(
+        timestamp=availability,
+        state="VALID",
+        reason="VALID_SEQUENCE",
+        detail="test",
+        planned_r=2.0,
+        evidence=evidence,
+    )
+    legacy_plan = _build_trade_plan(legacy, data=pd.DataFrame())
+    assert _decision_id_for(legacy) == "decision_20261003100517_valid"
+    assert legacy_plan is not None
+    assert legacy_plan.trade_id == "trade_20261003100517_long"
+    assert json.dumps(serialize_trade_plan(legacy_plan), indent=2) == json.dumps({
+        "trade_id": "trade_20261003100517_long",
+        "entry_time": "2026-10-03T10:05:17+00:00",
+        "direction": "LONG",
+        "entry_price": 101.0,
+        "stop_price": 99.0,
+        "target_price": 105.0,
+        "planned_r": 2.0,
+    }, indent=2)
 
 
 def test_smoke_classifier_marks_sparse_history():

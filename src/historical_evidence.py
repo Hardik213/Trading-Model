@@ -80,4 +80,5 @@ class HistoricalEvidenceProvider(EvidenceProvider):
             invalidation_price=invalidation,
             target_price=target,
             target_liquidity=target_liquidity,
+            replay_subject=visible_context.replay_subject,
         )

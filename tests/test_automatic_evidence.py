@@ -1,6 +1,8 @@
 import pandas as pd
 from src.automatic_evidence import EvidenceBuildConfig, build_automatic_evidence
 from src.data_contract import normalize_ohlc
+from src.replay_subject import ReplaySubject
+from src.timeframe_context import TimeframeContext
 
 
 def _bars(n=40):
@@ -29,6 +31,18 @@ def test_empty_visible_data_is_developing_evidence():
     assert result.reason == "EMPTY_VISIBLE_DATA"
     assert result.evidence.as_of == ts
     assert result.evidence.direction is None
+
+
+def test_automatic_evidence_preserves_optional_replay_subject():
+    df = _bars()
+    as_of = df.index[0] - pd.Timedelta(minutes=5)
+    subject = ReplaySubject(as_of, as_of)
+    context = TimeframeContext(frames={}, replay_subject=subject)
+
+    result = build_automatic_evidence(as_of, df.iloc[:0], context)
+
+    assert result.evidence.as_of == as_of
+    assert result.evidence.replay_subject == subject
 
 
 def test_no_future_data_is_used_when_no_rejection_exists():

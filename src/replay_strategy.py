@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import pandas as pd
@@ -60,6 +60,12 @@ class ICT2022ReplayRunner:
                 raise ValueError(
                     "Evidence provider returned a timestamp different from replay time."
                 )
+            subject = visible_context.replay_subject
+            if subject is not None:
+                if evidence.replay_subject not in (None, subject):
+                    raise ValueError("Evidence provider returned evidence for the wrong replay subject.")
+                if evidence.replay_subject is None:
+                    evidence = replace(evidence, replay_subject=subject)
 
             decision = self.adapter.evaluate(evidence)
             decisions.append(decision)
@@ -77,6 +83,7 @@ class ICT2022ReplayRunner:
                 ),
                 state=decision.state.value,
                 reason=decision.reason,
+                replay_subject=subject,
             )
 
         self.replay.run(callback)

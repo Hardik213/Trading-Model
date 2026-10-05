@@ -10,6 +10,7 @@ from .fvg import FVG
 from .ict2022_engine import ICT2022StateMachine, SetupContext, SetupDecision, SetupState
 from .mss import Direction, MSSEvent, normalize_direction
 from .market_structure import LiquidityEvent, LiquidityLevel
+from .replay_subject import ReplaySubject
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class StrategyEvidence:
     invalidation_price: Optional[float]
     target_price: Optional[float]
     target_liquidity: Optional[LiquidityLevel]
+    replay_subject: Optional[ReplaySubject] = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class AdapterDecision:
     target_price: Optional[float] = None
     planned_r: Optional[float] = None
     context: Optional[SetupContext] = None
+    replay_subject: Optional[ReplaySubject] = None
 
 
 def _planned_r(
@@ -91,6 +94,7 @@ class ICT2022StrategyAdapter:
                 state=SetupState.DEVELOPING,
                 direction=None,
                 reason="Directional evidence has not yet been established.",
+                replay_subject=evidence.replay_subject,
             )
 
         liquidity_event = evidence.liquidity_event
@@ -108,6 +112,7 @@ class ICT2022StrategyAdapter:
                     state=SetupState.DEVELOPING,
                     direction=evidence.direction,
                     reason="Liquidity confirmation is not yet available.",
+                    replay_subject=evidence.replay_subject,
                 )
 
         machine = ICT2022StateMachine()
@@ -152,6 +157,7 @@ class ICT2022StrategyAdapter:
                 SetupState.DEVELOPING,
                 evidence.direction,
                 "All structural prerequisites are present; entry price is not yet defined.",
+                replay_subject=evidence.replay_subject,
             )
 
         retracement = machine.evaluate_retracement(
@@ -186,6 +192,7 @@ class ICT2022StrategyAdapter:
                 SetupState.NO_TRADE,
                 evidence.direction,
                 "Entry, structural invalidation and target do not form valid trade geometry.",
+                replay_subject=evidence.replay_subject,
             )
 
         context = SetupContext(
@@ -211,6 +218,7 @@ class ICT2022StrategyAdapter:
             target_price=evidence.target_price,
             planned_r=planned_r,
             context=context,
+            replay_subject=evidence.replay_subject,
         )
 
     @staticmethod
@@ -226,6 +234,7 @@ class ICT2022StrategyAdapter:
             entry_price=evidence.entry_price,
             invalidation_price=evidence.invalidation_price,
             target_price=evidence.target_price,
+            replay_subject=evidence.replay_subject,
         )
 
 

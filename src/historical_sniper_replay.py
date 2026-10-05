@@ -8,13 +8,14 @@ the supplied evidence builder only the rows that were visible at that timestamp,
 then evaluates the already-built causal precision gate.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 import pandas as pd
 
 from .data_contract import normalize_ohlc
 from .replay_engine import HistoricalReplay, ReplayConfig
+from .replay_subject import ReplaySubject
 from .sniper_setup import PrecisionDecision, PrecisionEvidence, evaluate_precision_setup
 from .timeframe_context import TimeframeContext, build_context
 
@@ -32,6 +33,7 @@ class PrecisionReplayObservation:
     detail: str
     planned_r: Optional[float]
     evidence: Optional[PrecisionEvidence] = None
+    replay_subject: Optional[ReplaySubject] = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,12 @@ class HistoricalPrecisionReplay:
                 raise ValueError(
                     "Evidence builder returned evidence for a different timestamp."
                 )
+            subject = visible_context.replay_subject
+            if subject is not None:
+                if evidence.replay_subject not in (None, subject):
+                    raise ValueError("Evidence builder returned evidence for the wrong replay subject.")
+                if evidence.replay_subject is None:
+                    evidence = replace(evidence, replay_subject=subject)
             decision: PrecisionDecision = evaluate_precision_setup(
                 evidence,
                 min_planned_r=self.min_planned_r,
@@ -121,6 +129,7 @@ class HistoricalPrecisionReplay:
                     detail=decision.detail,
                     planned_r=decision.planned_r,
                     evidence=evidence,
+                    replay_subject=subject,
                 )
             )
             # The replay engine only needs a timestamp-validated observation.
@@ -130,6 +139,7 @@ class HistoricalPrecisionReplay:
                 decision=ReplayDecision(decision.state.value),
                 state=decision.state.value,
                 reason=decision.reason.value,
+                replay_subject=subject,
             )
 
         self.replay.run(callback)

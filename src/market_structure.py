@@ -46,8 +46,6 @@ class SwingPoint:
 
 @dataclass(frozen=True)
 class LiquidityLevel:
-    """A pool observed at ``timestamp``, confirmed later and available at its own event time."""
-
     timestamp: pd.Timestamp
     price: float
     side: LiquiditySide
@@ -59,8 +57,6 @@ class LiquidityLevel:
 
 @dataclass(frozen=True)
 class LiquidityEvent:
-    """A breach and its first decisive close; availability timestamps are distinct from bar labels."""
-
     level: LiquidityLevel
     breach_timestamp: pd.Timestamp
     breach_price: float
@@ -70,6 +66,41 @@ class LiquidityEvent:
     resolution_price: Optional[float] = None
     availability_timestamp: Optional[pd.Timestamp] = None
     breach_availability_timestamp: Optional[pd.Timestamp] = None
+
+
+def _bar_is_complete(df: pd.DataFrame, position: int) -> bool:
+    row = df.iloc[position]
+    for column in ("historical_complete", "is_complete"):
+        if column in df.columns and (pd.isna(row[column]) or not bool(row[column])):
+            return False
+    for column in ("available_at", "availability_ts"):
+        if column in df.columns and pd.isna(row[column]):
+            return False
+    return True
+
+
+def _bar_availability_timestamp(df: pd.DataFrame, position: int) -> pd.Timestamp:
+    row = df.iloc[position]
+    for column in ("available_at", "availability_ts", "interval_end"):
+        if column in df.columns and pd.notna(row[column]):
+            return pd.Timestamp(row[column])
+
+    if df.attrs.get("availability_mode") == "event_time":
+        raise ValueError("Event-time availability metadata is missing from the OHLC frame.")
+    bar_label = str(df.attrs.get("bar_label", "")).lower()
+    if bar_label not in {"left", "right"}:
+        raise ValueError("Explicit bar_label metadata is required for liquidity timing fallback.")
+    if df.index.tz is None:
+        raise ValueError("Timezone-aware bar labels are required for liquidity timing fallback.")
+    if bar_label == "right":
+        return pd.Timestamp(df.index[position])
+
+    timeframe = df.attrs.get("timeframe")
+    if timeframe is None:
+        raise ValueError("Timeframe metadata is required for left-labeled liquidity timing fallback.")
+    from .timeframe_context import _nominal_close_times
+
+    return pd.Timestamp(_nominal_close_times(df.iloc[[position]], str(timeframe))[0])
 
 
 def validate_ohlc(df: pd.DataFrame) -> None:
@@ -214,43 +245,6 @@ def detect_liquidity_breach(
     return float(bar["Low"]) < level.price
 
 
-def _bar_is_complete(df: pd.DataFrame, position: int) -> bool:
-    row = df.iloc[position]
-    for column in ("historical_complete", "is_complete"):
-        if column in df.columns:
-            if pd.isna(row[column]) or not bool(row[column]):
-                return False
-    for column in ("available_at", "availability_ts"):
-        if column in df.columns and pd.isna(row[column]):
-            return False
-    return True
-
-
-def _bar_availability_timestamp(df: pd.DataFrame, position: int) -> pd.Timestamp:
-    row = df.iloc[position]
-    for column in ("available_at", "availability_ts", "interval_end"):
-        if column in df.columns and pd.notna(row[column]):
-            return pd.Timestamp(row[column])
-
-    if df.attrs.get("availability_mode") == "event_time":
-        raise ValueError("Event-time availability metadata is missing from the OHLC frame.")
-    bar_label = str(df.attrs.get("bar_label", "")).lower()
-    if bar_label not in {"left", "right"}:
-        raise ValueError("Explicit bar_label metadata is required for liquidity timing fallback.")
-    if df.index.tz is None:
-        raise ValueError("Timezone-aware bar labels are required for liquidity timing fallback.")
-    if bar_label == "right":
-        return pd.Timestamp(df.index[position])
-
-    timeframe = df.attrs.get("timeframe")
-    if timeframe is None:
-        raise ValueError("Timeframe metadata is required for left-labeled liquidity timing fallback.")
-
-    from .timeframe_context import _nominal_close_times
-
-    return pd.Timestamp(_nominal_close_times(df.iloc[[position]], str(timeframe))[0])
-
-
 def resolve_breach(
     df: pd.DataFrame,
     level: LiquidityLevel,
@@ -259,15 +253,8 @@ def resolve_breach(
     max_resolution_bars: int = 3,
 ) -> LiquidityEvent:
     """
-    Resolve the bars immediately following a breach.
-
-        A close on the breach bar beyond the level is immediate acceptance, never
-        a sweep. Otherwise the first subsequent complete close beyond either side
-        resolves the event: back across the level is rejection; continuation beyond
-        it is acceptance. Rejection therefore always requires subsequent evidence.
-
-    If neither condition is observed inside the resolution window, the event
-    remains UNRESOLVED. A wick alone is therefore never labelled a sweep.
+    Resolve a breach at the first complete close that establishes rejection or
+    acceptance, recording when that evidence became available.
     """
     validate_ohlc(df)
     availability_mode = df.attrs.get("availability_mode")
@@ -301,15 +288,21 @@ def resolve_breach(
     depth = abs(breach_price - level.price)
     if not _bar_is_complete(df, breach_position):
         return LiquidityEvent(
-            level, df.index[breach_position], breach_price, depth,
-            BreachOutcome.UNRESOLVED,
+            level=level,
+            breach_timestamp=df.index[breach_position],
+            breach_price=breach_price,
+            breach_depth=depth,
+            outcome=BreachOutcome.UNRESOLVED,
         )
-    breach_availability = _bar_availability_timestamp(df, breach_position)
 
+    breach_availability = _bar_availability_timestamp(df, breach_position)
     close = float(bar["Close"])
-    if (level.side is LiquiditySide.BSL and close > level.price) or (
-        level.side is LiquiditySide.SSL and close < level.price
-    ):
+    breached_close = (
+        close > level.price
+        if level.side is LiquiditySide.BSL
+        else close < level.price
+    )
+    if breached_close:
         return LiquidityEvent(
             level=level,
             breach_timestamp=df.index[breach_position],
@@ -332,19 +325,23 @@ def resolve_breach(
     for position in resolution_positions:
         close = float(df.iloc[position]["Close"])
         if level.side is LiquiditySide.BSL:
-            if close < level.price:
-                outcome = BreachOutcome.REJECTION
-            elif close > level.price:
-                outcome = BreachOutcome.ACCEPTANCE
-            else:
-                continue
+            outcome = (
+                BreachOutcome.REJECTION
+                if close < level.price
+                else BreachOutcome.ACCEPTANCE
+                if close > level.price
+                else None
+            )
         else:
-            if close > level.price:
-                outcome = BreachOutcome.REJECTION
-            elif close < level.price:
-                outcome = BreachOutcome.ACCEPTANCE
-            else:
-                continue
+            outcome = (
+                BreachOutcome.REJECTION
+                if close > level.price
+                else BreachOutcome.ACCEPTANCE
+                if close < level.price
+                else None
+            )
+        if outcome is None:
+            continue
         return LiquidityEvent(
             level=level,
             breach_timestamp=df.index[breach_position],

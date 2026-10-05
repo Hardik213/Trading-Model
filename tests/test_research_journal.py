@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import pandas as pd
 import pytest
 
@@ -9,6 +10,7 @@ from src.research_journal import (
     TradeJournalRecord,
 )
 from src.research_validation import dataset_counts, validate_journal
+from src.replay_subject import ReplaySubject
 
 
 def ts():
@@ -52,6 +54,41 @@ def test_duplicate_trade_is_rejected():
     j.record_trade(trade_record())
     with pytest.raises(ValueError):
         j.record_trade(trade_record())
+
+
+def test_explicit_duplicate_trade_id_is_rejected_for_distinct_replay_subjects():
+    first_subject = ReplaySubject(
+        pd.Timestamp("2026-01-01T10:05:17Z"),
+        pd.Timestamp("2026-01-01T10:01:00Z"),
+    )
+    second_subject = ReplaySubject(
+        pd.Timestamp("2026-01-01T10:05:17Z"),
+        pd.Timestamp("2026-01-01T10:02:00Z"),
+    )
+    journal = ResearchJournal()
+    journal.record_trade(replace(
+        trade_record("explicit-shared-id"),
+        replay_subject=first_subject,
+    ))
+    with pytest.raises(ValueError, match="Duplicate trade_id"):
+        journal.record_trade(replace(
+            trade_record("explicit-shared-id"),
+            replay_subject=second_subject,
+        ))
+
+
+def test_journal_serialization_preserves_optional_replay_subject():
+    subject = ReplaySubject(
+        pd.Timestamp("2026-01-01T10:05:17Z"),
+        pd.Timestamp("2026-01-01T10:01:00Z"),
+    )
+    serialized = trade_record().__class__(**{
+        **trade_record().to_dict(),
+        "decision_time": ts(),
+        "replay_subject": subject,
+    }).to_dict()
+    round_trip = json.loads(json.dumps(serialized))
+    assert round_trip["replay_subject"] == subject.to_dict()
 
 
 def test_no_trade_requires_reason():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Callable, Mapping, Optional, Sequence
@@ -9,6 +9,7 @@ from typing import Callable, Mapping, Optional, Sequence
 import pandas as pd
 
 from .data_contract import normalize_ohlc
+from .replay_subject import ReplaySubject
 from .timeframe_context import (
     TimeframeContext,
     _complete_mask,
@@ -31,6 +32,7 @@ class ReplayObservation:
     decision: ReplayDecision
     state: str
     reason: str
+    replay_subject: ReplaySubject | None = None
 
 
 @dataclass(frozen=True)
@@ -206,8 +208,9 @@ class IncrementalHistoricalReplay:
         self._last_fed_label: dict[str, pd.Timestamp] = {}
         self._last_fed_interval_end: dict[str, pd.Timestamp] = {}
         self._last_fed_availability: pd.Timestamp | None = None
-        self._last_processed_decision: pd.Timestamp | None = None
+        self._last_processed_decision: tuple[pd.Timestamp, pd.Timestamp] | None = None
         self._pending: deque[tuple[ReplayAvailabilityGroup, dict[str, pd.DataFrame]]] = deque()
+        self._current_decision_subjects: deque[ReplaySubject] = deque()
         self._pending_bar_count = 0
         self._max_pending_groups = max_pending_groups
         self._max_pending_bars = max_pending_bars
@@ -404,8 +407,10 @@ class IncrementalHistoricalReplay:
         if self._state == "finished":
             return None
         try:
-            while self._pending:
-                group, frames = self._pending.popleft()
+            while not self._current_decision_subjects:
+                if not self._pending:
+                    return None
+                _group, frames = self._pending.popleft()
                 self._pending_bar_count -= sum(len(frame) for frame in frames.values())
                 for timeframe, frame in frames.items():
                     complete = _complete_mask(frame)
@@ -430,83 +435,111 @@ class IncrementalHistoricalReplay:
                 base_frame = frames.get(self.config.timeframe)
                 if base_frame is None:
                     continue
-                decision_times = eligible_decision_times(
+                eligible_availability = set(eligible_decision_times(
                     base_frame,
                     timeframe=self.config.timeframe,
                     start=self.config.start,
                     end=self.config.end,
-                )
-                if not len(decision_times):
-                    continue
-                if len(decision_times) != 1:
-                    raise RuntimeError("One availability group produced multiple decision times.")
-
-                timestamp = _require_utc(decision_times[0], "decision timestamp")
-                if (
-                    self._last_processed_decision is not None
-                    and timestamp <= self._last_processed_decision
-                ):
-                    raise ValueError("Decision timestamps must be strictly increasing.")
-
-                snapshots = {
-                    timeframe: self._history_frame(timeframe)
-                    for timeframe in self._history
-                }
-                visible_frames = {
-                    timeframe: (
-                        frame.loc[_event_time_visibility_mask(frame, timestamp)].copy()
-                        if len(frame)
-                        else frame.copy()
-                    )
-                    for timeframe, frame in snapshots.items()
-                }
-                visible_base = visible_frames[self.config.timeframe].reindex(
-                    columns=[
-                        "Open",
-                        "High",
-                        "Low",
-                        "Close",
-                        "available_at",
-                        "availability_ts",
-                        "interval_end",
-                        "historical_complete",
-                        "is_complete",
-                    ]
-                )
-                visible_context = TimeframeContext(
-                    frames={
-                        timeframe: frame.reindex(
-                            columns=[
-                                "Open",
-                                "High",
-                                "Low",
-                                "Close",
-                                *[
-                                    column
-                                    for column in (
-                                        "interval_end",
-                                        "available_at",
-                                        "availability_ts",
-                                        "historical_complete",
-                                        "is_complete",
-                                    )
-                                    if column in frame.columns
-                                ],
-                            ]
+                ))
+                decision_subjects = []
+                for base_timestamp, row in base_frame.loc[_complete_mask(base_frame)].iterrows():
+                    availability = _require_utc(row["available_at"], "decision timestamp")
+                    if availability in eligible_availability:
+                        decision_subjects.append(
+                            ReplaySubject(
+                                availability_timestamp=availability,
+                                base_bar_timestamp=_require_utc(
+                                    base_timestamp,
+                                    "base bar timestamp",
+                                ),
+                            )
                         )
-                        for timeframe, frame in visible_frames.items()
-                    }
+                self._current_decision_subjects.extend(
+                    sorted(
+                        decision_subjects,
+                        key=lambda subject: (
+                            subject.availability_timestamp,
+                            subject.base_bar_timestamp,
+                        ),
+                    )
                 )
 
-                # Mark before callback invocation: callback side effects are not retry-safe.
-                self._last_processed_decision = timestamp
-                observation = callback(timestamp, visible_base, visible_context)
-                if not isinstance(observation, ReplayObservation):
-                    raise TypeError("Replay callback must return a ReplayObservation.")
-                if observation.timestamp != timestamp:
-                    raise ValueError("Replay callback returned an observation with the wrong timestamp.")
-                return observation
-            return None
+            subject = self._current_decision_subjects.popleft()
+            timestamp = subject.availability_timestamp
+            base_bar_timestamp = subject.base_bar_timestamp
+            decision_identity = (timestamp, base_bar_timestamp)
+            if (
+                self._last_processed_decision is not None
+                and decision_identity <= self._last_processed_decision
+            ):
+                raise ValueError("Decision identities must be strictly increasing.")
+
+            snapshots = {
+                timeframe: self._history_frame(timeframe)
+                for timeframe in self._history
+            }
+            visible_frames = {
+                timeframe: (
+                    frame.loc[_event_time_visibility_mask(frame, timestamp)].copy()
+                    if len(frame)
+                    else frame.copy()
+                )
+                for timeframe, frame in snapshots.items()
+            }
+            visible_frames[self.config.timeframe] = visible_frames[
+                self.config.timeframe
+            ].loc[lambda frame: frame.index <= base_bar_timestamp].copy()
+            visible_base = visible_frames[self.config.timeframe].reindex(
+                columns=[
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "available_at",
+                    "availability_ts",
+                    "interval_end",
+                    "historical_complete",
+                    "is_complete",
+                ]
+            )
+            visible_context = TimeframeContext(
+                frames={
+                    timeframe: frame.reindex(
+                        columns=[
+                            "Open",
+                            "High",
+                            "Low",
+                            "Close",
+                            *[
+                                column
+                                for column in (
+                                    "interval_end",
+                                    "available_at",
+                                    "availability_ts",
+                                    "historical_complete",
+                                    "is_complete",
+                                )
+                                if column in frame.columns
+                            ],
+                        ]
+                    )
+                    for timeframe, frame in visible_frames.items()
+                },
+                replay_subject=subject,
+            )
+
+            # Mark before callback invocation: callback side effects are not retry-safe.
+            self._last_processed_decision = decision_identity
+            observation = callback(timestamp, visible_base, visible_context)
+            if not isinstance(observation, ReplayObservation):
+                raise TypeError("Replay callback must return a ReplayObservation.")
+            if observation.timestamp != timestamp:
+                raise ValueError("Replay callback returned an observation with the wrong timestamp.")
+            if observation.replay_subject not in (None, subject):
+                raise ValueError("Replay callback returned an observation for the wrong subject.")
+            if observation.replay_subject is None:
+                observation = replace(observation, replay_subject=subject)
+            return observation
         except Exception:
             self._state = "failed"
             raise
@@ -516,7 +549,7 @@ class IncrementalHistoricalReplay:
         if self._state == "finished":
             return
         self._ensure_open()
-        if self._pending:
+        if self._pending or self._current_decision_subjects:
             raise RuntimeError("Pending availability groups must be processed before finish().")
         self._state = "finished"
 

@@ -1,10 +1,13 @@
 import pandas as pd
 
+from src.historical_evidence import DetectorBundle, HistoricalEvidenceProvider
 from src.fvg import FVG, FVGDirection
 from src.strategy_adapter import ICT2022StrategyAdapter, StrategyEvidence
 from src.ict2022_engine import SetupState
 from src.mss import Direction
 from src.market_structure import BreachOutcome, LiquidityEvent, LiquidityLevel, LiquiditySide
+from src.replay_subject import ReplaySubject
+from src.timeframe_context import TimeframeContext
 
 
 def ts(m):
@@ -153,6 +156,35 @@ def test_complete_sequence_becomes_active_trade():
     d=ICT2022StrategyAdapter().evaluate(evidence())
     assert d.state is SetupState.ACTIVE_TRADE
     assert d.planned_r == 3.0
+
+
+def test_replay_subject_flows_through_evidence_and_adapter_decision():
+    subject = ReplaySubject(ts(17), ts(2))
+    no_evidence = lambda *args: None
+    provider = HistoricalEvidenceProvider(DetectorBundle(
+        direction=no_evidence,
+        draw_on_liquidity=no_evidence,
+        liquidity_event=no_evidence,
+        mss=no_evidence,
+        pd_array=no_evidence,
+        dealing_range=no_evidence,
+        entry_price=no_evidence,
+        invalidation_price=no_evidence,
+        target_price=no_evidence,
+        target_liquidity=no_evidence,
+    ))
+
+    strategy_evidence = provider.build(
+        subject.availability_timestamp,
+        pd.DataFrame(),
+        TimeframeContext(frames={}, replay_subject=subject),
+    )
+    decision = ICT2022StrategyAdapter().evaluate(strategy_evidence)
+
+    assert strategy_evidence.timestamp == subject.availability_timestamp
+    assert strategy_evidence.replay_subject == subject
+    assert decision.timestamp == subject.availability_timestamp
+    assert decision.replay_subject == subject
 
 
 def test_wrong_pd_direction_is_no_trade():

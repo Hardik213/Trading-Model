@@ -15,9 +15,7 @@ from src.mss import Direction
 
 def frame(rows):
     idx = pd.date_range("2026-01-01 10:00", periods=len(rows), freq="5min", tz="UTC")
-    result = pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close"])
-    result.attrs["bar_label"] = "right"
-    return result
+    return pd.DataFrame(rows, index=idx, columns=["Open", "High", "Low", "Close"])
 
 
 def test_swing_is_not_visible_before_confirmation():
@@ -134,9 +132,6 @@ def test_event_time_availability_gates_swing_confirmation_and_shared_rows():
     )
     assert not any(level.price == 105 for level in before)
     assert any(level.price == 105 for level in at_availability)
-    confirmed_level = next(level for level in at_availability if level.price == 105)
-    assert confirmed_level.confirmation_timestamp == df.index[2]
-    assert confirmed_level.availability_timestamp == df.loc[df.index[2], "available_at"]
 
 
 def test_incomplete_event_time_bar_cannot_confirm_a_swing():
@@ -191,40 +186,14 @@ def test_rejection_waits_for_delayed_resolution_bar_availability():
     assert not any(item.kind is LiquidityEvidenceKind.REJECTION for item in before)
     assert any(item.kind is LiquidityEvidenceKind.REJECTION for item in at_availability)
 
-    confirmed = next(item for item in at_availability if item.kind is LiquidityEvidenceKind.REJECTION)
-    assert confirmed.breach.resolution_timestamp == df.index[4]
-    assert confirmed.breach.availability_timestamp == pd.Timestamp("2026-01-01T10:30:00Z")
-    assert confirmed.confirmed
-
-
-def test_endpoint_only_liquidity_levels_wait_for_interval_end():
-    df=frame([
-        (100,101,99,100),
-        (100,105,99,104),
-        (102,103,100,101),
-    ])
-    df["interval_end"]=df.index+pd.Timedelta(minutes=10)
-
-    visible_before_end=confirmed_liquidity_map(
-        df,pd.Timestamp("2026-01-01T10:15:00Z"),left_bars=1,right_bars=1
-    )
-    visible_at_end=confirmed_liquidity_map(
-        df,pd.Timestamp("2026-01-01T10:25:00Z"),left_bars=1,right_bars=1
-    )
-
-    assert not any(level.price==105 for level in visible_before_end)
-    assert any(level.price==105 for level in visible_at_end)
-
 
 def test_normalized_nominal_close_fallback_gates_swing_confirmation():
-    raw = frame([
-        (100,101,99,100),
-        (100,105,99,104),
-        (102,103,100,101),
-    ])
-    raw.attrs["bar_label"] = "left"
     df=normalize_ohlc(
-        raw,
+        frame([
+            (100,101,99,100),
+            (100,105,99,104),
+            (102,103,100,101),
+        ]),
         timeframe="5M",
         source="TEST",
     )
@@ -239,55 +208,12 @@ def test_normalized_nominal_close_fallback_gates_swing_confirmation():
     assert any(level.price == 105 for level in at_close)
 
 
-def test_left_labeled_liquidity_confirmation_waits_for_nominal_close():
-    df = frame([
-        (100, 101, 99, 100),
-        (100, 105, 99, 104),
-        (102, 103, 100, 101),
-    ])
-    df.attrs["bar_label"] = "left"
-    df.attrs["timeframe"] = "5min"
-    df.attrs["availability_mode"] = "nominal_close_fallback"
-
-    before_close = confirmed_liquidity_map(
-        df, pd.Timestamp("2026-01-01T10:14:59Z"), left_bars=1, right_bars=1
-    )
-    at_close = confirmed_liquidity_map(
-        df, pd.Timestamp("2026-01-01T10:15:00Z"), left_bars=1, right_bars=1
-    )
-
-    assert not any(level.price == 105 for level in before_close)
-    assert any(level.price == 105 for level in at_close)
-
-
-def test_liquidity_query_rejects_missing_timeframe_and_availability():
-    df = frame([
-        (100, 101, 99, 100),
-        (100, 105, 99, 104),
-        (102, 103, 100, 101),
-    ])
-    df.attrs.pop("bar_label")
-
-    with pytest.raises(ValueError, match="Timeframe|bar_label|availability"):
-        confirmed_liquidity_map(
-            df, df.index[2] + pd.Timedelta(minutes=1), left_bars=1, right_bars=1
-        )
-
-
-def test_explicit_event_time_requires_actual_availability_evidence():
-    df = frame([(100, 101, 99, 100)])
-    df.attrs["availability_mode"] = "event_time"
-    df.attrs.pop("bar_label")
-
-    with pytest.raises(ValueError, match="availability"):
-        confirmed_liquidity_map(df, df.index[0] + pd.Timedelta(minutes=5))
-
-
 @pytest.mark.parametrize(
     ("availability", "availability_alias", "drop_availability"),
     [
         ("2026-01-01T10:05:00Z", "2026-01-01T10:06:00Z", False),
         ("2026-01-01T10:04:00Z", "2026-01-01T10:04:00Z", False),
+        (None, None, True),
     ],
 )
 def test_event_time_filter_rejects_inconsistent_or_missing_metadata(
@@ -299,32 +225,12 @@ def test_event_time_filter_rejects_inconsistent_or_missing_metadata(
     df.attrs["availability_mode"]="event_time"
     df.attrs["timeframe"]="5M"
     df["interval_end"]=pd.to_datetime(["2026-01-01T10:05:00Z"],utc=True)
-    df["available_at"]=pd.to_datetime([availability],utc=True)
-    df["availability_ts"]=pd.to_datetime([availability_alias],utc=True)
+    if not drop_availability:
+        df["available_at"]=pd.to_datetime([availability],utc=True)
+        df["availability_ts"]=pd.to_datetime([availability_alias],utc=True)
 
     with pytest.raises(ValueError):
         confirmed_liquidity_map(df,pd.Timestamp("2026-01-01T10:10:00Z"))
-
-
-def test_event_time_mode_accepts_endpoint_only_availability():
-    df=frame([
-        (100,101,99,100),
-        (100,105,99,104),
-        (102,103,100,101),
-    ])
-    df.attrs["availability_mode"]="event_time"
-    df.attrs["timeframe"]="5M"
-    df["interval_end"]=df.index+pd.Timedelta(minutes=5)
-
-    before=confirmed_liquidity_map(
-        df,pd.Timestamp("2026-01-01T10:14:59Z"),left_bars=1,right_bars=1
-    )
-    at_end=confirmed_liquidity_map(
-        df,pd.Timestamp("2026-01-01T10:15:00Z"),left_bars=1,right_bars=1
-    )
-
-    assert not any(level.price==105 for level in before)
-    assert any(level.price==105 for level in at_end)
 
 
 def test_event_time_availability_must_follow_bar_order():

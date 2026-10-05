@@ -6,6 +6,7 @@ from typing import Mapping
 import pandas as pd
 
 from .data_contract import normalize_ohlc
+from .replay_subject import ReplaySubject
 
 
 _TIMEFRAME_OFFSETS = {
@@ -209,6 +210,7 @@ class TimeframeContext:
     """
 
     frames: Mapping[str, pd.DataFrame]
+    replay_subject: ReplaySubject | None = None
 
     def available_as_of(self, timeframe: str, as_of: pd.Timestamp) -> pd.DataFrame:
         if timeframe not in self.frames:

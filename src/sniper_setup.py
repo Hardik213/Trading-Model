@@ -22,6 +22,7 @@ import pandas as pd
 from .fvg import FVG, FVGDirection
 from .market_structure import BreachOutcome, LiquidityEvent, LiquidityLevel, LiquiditySide
 from .mss import Direction, MSSEvent, normalize_direction
+from .replay_subject import ReplaySubject
 
 
 class PrecisionState(str, Enum):
@@ -70,6 +71,7 @@ class PrecisionEvidence:
     invalidation_price: Optional[float]
     target_price: Optional[float]
     target_liquidity: Optional[LiquidityLevel]
+    replay_subject: Optional[ReplaySubject] = None
 
 
 @dataclass(frozen=True)

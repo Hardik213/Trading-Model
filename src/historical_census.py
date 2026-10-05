@@ -22,7 +22,7 @@ from .replay_engine import ReplayConfig
 
 def serialize_trade_plan(plan: TradePlan) -> dict[str, Any]:
     """Serialize the canonical immutable TradePlan into a deterministic JSON shape."""
-    return {
+    payload = {
         "trade_id": plan.trade_id,
         "entry_time": plan.entry_time.isoformat(),
         "direction": plan.direction.value,
@@ -31,6 +31,9 @@ def serialize_trade_plan(plan: TradePlan) -> dict[str, Any]:
         "target_price": float(plan.target_price),
         "planned_r": float(plan.planned_r),
     }
+    if plan.replay_subject is not None:
+        payload["replay_subject"] = plan.replay_subject.to_dict()
+    return payload
 
 
 CANONICAL_HISTORICAL_CENSUS_DIR = "data/reports/historical_census"
@@ -258,7 +261,18 @@ def _trade_direction_for(direction: Optional[Direction]) -> Optional[TradeDirect
     return TradeDirection.LONG if normalize_direction(direction) is Direction.BULLISH else TradeDirection.SHORT
 
 
+def _replay_subject_for(obs):
+    return getattr(obs, "replay_subject", None) or getattr(
+        getattr(obs, "evidence", None),
+        "replay_subject",
+        None,
+    )
+
+
 def _decision_id_for(obs) -> str:
+    subject = _replay_subject_for(obs)
+    if subject is not None:
+        return f"decision_{subject.subject_id}"
     ts = pd.Timestamp(obs.timestamp)
     return f"decision_{ts.strftime('%Y%m%d%H%M%S')}_{getattr(obs, 'state', 'UNKNOWN').lower()}"
 
@@ -280,20 +294,27 @@ def _build_trade_plan(obs, *, data: pd.DataFrame) -> Optional[TradePlan]:
     if entry is None or invalidation is None or target is None or trade_direction is None:
         return None
 
+    subject = _replay_subject_for(obs)
+    trade_id = (
+        f"trade_{subject.subject_id}_{trade_direction.value.lower()}"
+        if subject is not None
+        else f"trade_{pd.Timestamp(obs.timestamp).strftime('%Y%m%d%H%M%S')}_{trade_direction.value.lower()}"
+    )
     return TradePlan(
-        trade_id=f"trade_{pd.Timestamp(obs.timestamp).strftime('%Y%m%d%H%M%S')}_{trade_direction.value.lower()}",
+        trade_id=trade_id,
         entry_time=pd.Timestamp(obs.timestamp),
         direction=trade_direction,
         entry_price=float(entry),
         stop_price=float(invalidation),
         target_price=float(target),
         planned_r=float(obs.planned_r) if obs.planned_r is not None else abs(float(target) - float(entry)) / abs(float(entry) - float(invalidation)),
+        replay_subject=subject,
     )
 
 
 def _trade_outcome_record(plan: TradePlan, data: pd.DataFrame) -> dict[str, Any]:
     result = simulate_trade(data, plan)
-    return {
+    payload = {
         "trade_id": plan.trade_id,
         "entry_time": plan.entry_time.isoformat(),
         "direction": plan.direction.value,
@@ -308,6 +329,9 @@ def _trade_outcome_record(plan: TradePlan, data: pd.DataFrame) -> dict[str, Any]
         "bars_held": result.bars_held,
         "reason": result.reason,
     }
+    if result.replay_subject is not None:
+        payload["replay_subject"] = result.replay_subject.to_dict()
+    return payload
 
 
 def _decision_record(obs, *, source: str, include_outcome: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -332,6 +356,24 @@ def _decision_record(obs, *, source: str, include_outcome: Optional[dict[str, An
     }
     if include_outcome is not None:
         payload["post_decision_outcome"] = include_outcome
+    subject = _replay_subject_for(obs)
+    if subject is not None:
+        payload["replay_subject"] = subject.to_dict()
+    return payload
+
+
+def _observation_payload(obs) -> dict[str, Any]:
+    payload = {
+        "timestamp": obs.timestamp.isoformat(),
+        "state": obs.state,
+        "reason": obs.reason,
+        "detail": obs.detail,
+        "planned_r": obs.planned_r,
+    }
+    subject = _replay_subject_for(obs)
+    if subject is not None:
+        payload["decision_id"] = _decision_id_for(obs)
+        payload["replay_subject"] = subject.to_dict()
     return payload
 
 
@@ -413,27 +455,21 @@ def build_historical_census(
                 outcome = _trade_outcome_record(plan, replay_frame)
                 trade_outcomes.append(outcome)
                 decision_snapshot = _decision_record(obs, source=source)
-                setup_records.append({
+                setup_record = {
                     "decision_id": decision_snapshot["decision_id"],
                     "decision_time": decision_snapshot["decision_time"],
                     "trade_plan": serialize_trade_plan(plan),
                     "post_decision_outcome": outcome,
-                })
+                }
+                if plan.replay_subject is not None:
+                    setup_record["replay_subject"] = plan.replay_subject.to_dict()
+                setup_records.append(setup_record)
 
         payload: dict[str, Any] = {
             "classification": classification,
             "coverage": coverage,
             "report": report.to_dict(),
-            "observations": [
-                {
-                    "timestamp": obs.timestamp.isoformat(),
-                    "state": obs.state,
-                    "reason": obs.reason,
-                    "detail": obs.detail,
-                    "planned_r": obs.planned_r,
-                }
-                for obs in result.observations
-            ],
+            "observations": [_observation_payload(obs) for obs in result.observations],
             "trade_plan_objects": trade_plan_objects,
             "trade_plans": trade_plans,
             "trade_outcomes": trade_outcomes,
