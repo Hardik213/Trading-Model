@@ -458,6 +458,24 @@ def test_position_at_exactly_one_percent_price_risk_is_accepted():
     assert results[0].status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
 
 
+def test_any_positive_price_risk_above_one_percent_is_rejected():
+    _, results = execute(
+        [quote("2026-01-01T00:00:00Z", order=0), quote("2026-01-01T00:00:01Z", 100, 101, 1)],
+        [
+            decision(
+                "2026-01-01T00:00:00Z",
+                stop=90.9999999999995,
+                target=120,
+                quantity=1,
+            )
+        ],
+        initial_equity=10_000,
+        execution_config=config(contract_size=10),
+    )
+    assert results[0].status is ExecutionStatus.NO_TRADE_RISK_LIMIT
+    assert results[0].entry_fill is None
+
+
 def test_accepted_intent_records_immediate_pre_entry_equity_and_risk_budget():
     engine, results = execute(
         [quote("2026-01-01T00:00:00Z", order=0), quote("2026-01-01T00:00:01Z", 100, 101, 1)],
@@ -586,6 +604,30 @@ def test_quantity_must_meet_minimum_and_step(quantity):
     )
     assert results[0].status is ExecutionStatus.NO_TRADE_INVALID_QUANTITY
     assert results[0].entry_fill is None
+
+
+def test_quantity_just_off_step_within_previous_tolerance_is_rejected():
+    _, results = execute(
+        [
+            quote("2026-01-01T00:00:00Z", order=0),
+            quote("2026-01-01T00:00:01Z", 100, 101, 1),
+        ],
+        [decision("2026-01-01T00:00:00Z", quantity=0.10000000000005)],
+    )
+    assert results[0].status is ExecutionStatus.NO_TRADE_INVALID_QUANTITY
+    assert results[0].entry_fill is None
+
+
+def test_exact_quantity_step_is_accepted():
+    _, results = execute(
+        [
+            quote("2026-01-01T00:00:00Z", order=0),
+            quote("2026-01-01T00:00:01Z", 100, 101, 1),
+        ],
+        [decision("2026-01-01T00:00:00Z", quantity=0.3)],
+    )
+    assert results[0].entry_fill is not None
+    assert results[0].entry_fill.quantity == 0.3
 
 
 def test_risk_budget_uses_equity_after_prior_trade():

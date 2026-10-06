@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import Iterable, Mapping
@@ -70,6 +71,16 @@ def _finite_nonnegative(value: object) -> bool:
         and math.isfinite(float(value))
         and float(value) >= 0.0
     )
+
+
+def _quantity_matches_step(quantity: float, step: float) -> bool:
+    quantity_numerator, quantity_denominator = Decimal(str(quantity)).as_integer_ratio()
+    step_numerator, step_denominator = Decimal(str(step)).as_integer_ratio()
+    return (
+        quantity_numerator * step_denominator
+    ) % (
+        quantity_denominator * step_numerator
+    ) == 0
 
 
 def _execution_identity(
@@ -610,8 +621,7 @@ class ExecutionEngine:
             self._replace_order(intent.order_id, status=state.status.value, reason=state.reason)
             state.order = self._order_by_id(intent.order_id)
             return None, active
-        step_count = quantity / float(config.quantity_step)
-        if not math.isclose(step_count, round(step_count), rel_tol=1e-10, abs_tol=1e-10):
+        if not _quantity_matches_step(quantity, float(config.quantity_step)):
             state.status = ExecutionStatus.NO_TRADE_INVALID_QUANTITY
             state.reason = "Quantity does not conform to the configured quantity step."
             self._replace_order(intent.order_id, status=state.status.value, reason=state.reason)
@@ -639,7 +649,7 @@ class ExecutionEngine:
             * float(config.account_currency_conversion)
             * quantity
         )
-        if risk_amount > risk_budget + max(1e-12, risk_budget * 1e-12):
+        if risk_amount > risk_budget:
             state.status = ExecutionStatus.NO_TRADE_RISK_LIMIT
             state.reason = f"Configured quantity risks {risk_amount:g}, above 1% budget {risk_budget:g}."
             self._replace_order(intent.order_id, status=state.status.value, reason=state.reason)
