@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Protocol, Sequence
 
 import pandas as pd
 
@@ -192,6 +192,12 @@ class DecisionSet:
             raise ValueError("All decisions in a set must share its decision_time.")
 
 
+class CompleteExecutionDecisionSet(Protocol):
+    available_at: pd.Timestamp
+    replay_group: object
+    decisions: Sequence[DecisionRecord]
+
+
 @dataclass(frozen=True)
 class ExecutionConfig:
     contract_size: float | None
@@ -352,12 +358,23 @@ class ExecutionEngine:
         self.positions: list[PositionRecord] = []
         self.results: tuple[ExecutionResult, ...] = ()
         self._has_run = False
+        self._incremental_started = False
+        self._incremental_finished = False
+        self._incremental_current_timestamp: pd.Timestamp | None = None
+        self._incremental_previous_source_order: int | None = None
+        self._incremental_pending: tuple[ExecutionIntent, _ResultState] | None = None
+        self._incremental_active: tuple[PositionRecord, _ResultState] | None = None
+        self._incremental_states: dict[str, _ResultState] = {}
+        self._incremental_decisions: list[DecisionRecord] = []
+        self._incremental_submitted_times: set[pd.Timestamp] = set()
 
     def run(
         self,
         ticks: Iterable[QuoteEvent],
         decisions: Iterable[DecisionRecord],
     ) -> tuple[ExecutionResult, ...]:
+        if self._incremental_started:
+            raise RuntimeError("ExecutionEngine cannot mix incremental processing with run().")
         if self._has_run:
             raise RuntimeError("An ExecutionEngine instance can run only once.")
         self._has_run = True
@@ -453,6 +470,155 @@ class ExecutionEngine:
                 ),
             )
             for decision in decision_list
+        )
+        return self.results
+
+    def process_tick(self, tick: QuoteEvent) -> None:
+        """Apply one observed quote to existing position/intent state only."""
+        if self._has_run:
+            raise RuntimeError("ExecutionEngine is already running or finished.")
+        if self._incremental_finished:
+            raise RuntimeError("Incremental execution is finished.")
+        if not isinstance(tick, QuoteEvent):
+            raise TypeError("tick must be a QuoteEvent.")
+        if (
+            self._incremental_current_timestamp is not None
+            and tick.timestamp < self._incremental_current_timestamp
+        ):
+            raise ValueError("Tick timestamps must be non-decreasing.")
+        if (
+            self._incremental_previous_source_order is not None
+            and tick.source_order <= self._incremental_previous_source_order
+        ):
+            raise ValueError("Tick source_order must be strictly increasing.")
+
+        self._incremental_started = True
+        self._incremental_current_timestamp = tick.timestamp
+        self._incremental_previous_source_order = tick.source_order
+        if self._incremental_active is not None:
+            self._incremental_active = self._monitor_position(self._incremental_active, tick)
+        if (
+            self._incremental_pending is not None
+            and tick.timestamp > self._incremental_pending[0].decision_time
+        ):
+            self._incremental_pending, self._incremental_active = self._match_pending(
+                self._incremental_pending,
+                tick,
+                self._incremental_active,
+            )
+
+    def submit_decision_set(
+        self,
+        decision_set: CompleteExecutionDecisionSet,
+    ) -> None:
+        """Arbitrate one complete availability group after its tick was processed."""
+        if self._has_run:
+            raise RuntimeError("ExecutionEngine is already running or finished.")
+        if self._incremental_finished:
+            raise RuntimeError("Incremental execution is finished.")
+        if self._incremental_current_timestamp is None:
+            raise RuntimeError("Process the availability tick before submitting decisions.")
+        if not hasattr(decision_set, "available_at") or not hasattr(decision_set, "decisions"):
+            raise TypeError("decision_set must be a complete availability decision set.")
+        replay_group = getattr(decision_set, "replay_group", None)
+        if replay_group is None or not hasattr(replay_group, "available_at"):
+            raise TypeError("decision_set must include its complete replay availability group.")
+
+        timestamp = _utc_timestamp(decision_set.available_at, "decision-set availability")
+        group_timestamp = _utc_timestamp(replay_group.available_at, "replay-group availability")
+        if timestamp != group_timestamp:
+            raise ValueError("Decision set and replay group availability must match.")
+        if timestamp != self._incremental_current_timestamp:
+            raise ValueError("Decision set must match the most recently processed tick.")
+        if timestamp in self._incremental_submitted_times:
+            raise ValueError("A decision set was already submitted for this availability.")
+
+        decisions = tuple(decision_set.decisions)
+        local_subjects: set[str] = set()
+        for decision in decisions:
+            if not isinstance(decision, DecisionRecord):
+                raise TypeError("decision_set must contain DecisionRecord values.")
+            subject_id = decision.subject.subject_id
+            if subject_id in local_subjects or subject_id in self._incremental_states:
+                raise ValueError(f"Duplicate decision subject: {subject_id}")
+            if decision.decision_time != timestamp:
+                raise ValueError("Every decision time must equal the set availability.")
+            if decision.subject.availability_timestamp != timestamp:
+                raise ValueError("Every decision subject must share the set availability.")
+            local_subjects.add(subject_id)
+
+        self._incremental_started = True
+        self._incremental_submitted_times.add(timestamp)
+        group, group_states = self._arbitrate_group(
+            timestamp,
+            list(decisions),
+            self._incremental_active,
+        )
+        self.decision_sets.append(group)
+        self._incremental_states.update(group_states)
+        self._incremental_decisions.extend(decisions)
+        if group.selected_subject_id is not None:
+            selected_state = group_states[group.selected_subject_id]
+            self._incremental_pending, self._incremental_active = self._create_intent(
+                selected_state,
+                self._incremental_pending,
+                self._incremental_active,
+            )
+
+    def finish(self) -> tuple[ExecutionResult, ...]:
+        """Finalize pending intents and report open positions with existing EOF policy."""
+        if self._has_run:
+            raise RuntimeError("ExecutionEngine is already running or finished.")
+        if self._incremental_finished:
+            raise RuntimeError("Incremental execution is already finished.")
+        self._incremental_started = True
+        self._incremental_finished = True
+
+        if self._incremental_pending is not None:
+            intent, state = self._incremental_pending
+            self._replace_order(
+                intent.order_id,
+                status=ExecutionStatus.UNFILLED_AT_END_OF_INPUT.value,
+            )
+            state.order = self._order_by_id(intent.order_id)
+            state.status = ExecutionStatus.UNFILLED_AT_END_OF_INPUT
+            state.reason = ExecutionStatus.UNFILLED_AT_END_OF_INPUT.value
+        if self._incremental_active is not None:
+            position, state = self._incremental_active
+            state.position = position
+            state.status = ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+            state.reason = "Open-position end-of-input valuation is UNSPECIFIED; no mark was created."
+
+        self.ending_equity = self._equity
+        self.results = tuple(
+            ExecutionResult(
+                subject=decision.subject,
+                decision=decision,
+                decision_set=self._incremental_states[decision.subject.subject_id].decision_set,
+                status=self._incremental_states[decision.subject.subject_id].status,
+                reason=self._incremental_states[decision.subject.subject_id].reason,
+                intent=self._incremental_states[decision.subject.subject_id].intent,
+                order=self._incremental_states[decision.subject.subject_id].order,
+                exit_order=self._incremental_states[decision.subject.subject_id].exit_order,
+                position=self._incremental_states[decision.subject.subject_id].position,
+                entry_fill=self._incremental_states[decision.subject.subject_id].entry_fill,
+                exit_fill=self._incremental_states[decision.subject.subject_id].exit_fill,
+                gross_realized_pnl=self._incremental_states[
+                    decision.subject.subject_id
+                ].gross_realized_pnl,
+                net_realized_pnl=self._incremental_states[
+                    decision.subject.subject_id
+                ].net_realized_pnl,
+                cost_breakdown=self._incremental_states[
+                    decision.subject.subject_id
+                ].cost_breakdown,
+                diagnostic_only=(
+                    self.config.costs_are_valid
+                    and self.config.commission_per_unit_per_side == 0
+                    and self.config.slippage_per_unit_per_side == 0
+                ),
+            )
+            for decision in self._incremental_decisions
         )
         return self.results
 
@@ -819,6 +985,7 @@ class ExecutionEngine:
 
 
 __all__ = [
+    "CompleteExecutionDecisionSet",
     "DecisionRecord",
     "DecisionSet",
     "ExecutionConfig",
