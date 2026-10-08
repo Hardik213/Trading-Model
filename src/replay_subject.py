@@ -65,3 +65,8 @@ class ReplaySubject:
         if supplied_id is not None and supplied_id != subject.subject_id:
             raise ValueError("subject_id does not match the replay subject timestamps.")
         return subject
+
+
+def same_subject_id(left: ReplaySubject, right: ReplaySubject) -> bool:
+    """Return whether two ReplaySubject values identify the same replay subject."""
+    return left.subject_id == right.subject_id

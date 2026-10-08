@@ -300,16 +300,19 @@ def test_planned_entry_price_cannot_be_used_as_fill_price():
     assert execution.fills[0].observed_price != proposed.evidence_reference["planned_entry_price"]
 
 
-def test_missing_quantity_is_not_inferred():
+def test_missing_decision_quantity_is_derived_on_the_entry_quote():
     execution = engine()
     proposed = decision("2026-01-01T00:00:00Z", quantity=None)
     execution.process_tick(tick("2026-01-01T00:00:00Z", 0))
     execution.submit_decision_set(decision_set("2026-01-01T00:00:00Z", (proposed,)))
+    execution.process_tick(tick("2026-01-01T00:00:01Z", 1))
     result = execution.finish()[0]
 
-    assert execution.intents == []
-    assert result.status is ExecutionStatus.UNSPECIFIED_QUANTITY_ROUNDING
-    assert "quantity rounding policy is UNSPECIFIED" in result.reason
+    assert len(execution.intents) == 1
+    assert result.entry_fill.quantity == 9
+    assert result.intent.price_risk == 99
+    assert result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT
+    assert result.unrealized_pnl == -9
 
 
 def test_no_synthetic_tick_or_fill_is_created():
@@ -339,8 +342,11 @@ def test_pending_and_open_position_eof_statuses_remain_unchanged():
     open_engine.submit_decision_set(decision_set("2026-01-01T00:00:00Z", (opened,)))
     open_engine.process_tick(tick("2026-01-01T00:00:01Z", 1))
     open_result = open_engine.finish()[0]
-    assert open_result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+    assert open_result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT
     assert open_result.position.exit_fill is None
+    assert open_result.mark_to_market.side == "BID"
+    assert open_result.mark_to_market.timestamp == ts("2026-01-01T00:00:01Z")
+    assert open_result.mark_to_market.unrealized_pnl == -9
 
 
 def test_execution_ids_and_subject_identity_remain_distinct_across_subjects():

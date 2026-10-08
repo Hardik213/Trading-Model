@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -145,6 +146,69 @@ def test_quote_requires_nonempty_source_provenance():
         )
 
 
+def test_quote_provenance_is_deeply_bounded_and_immutable():
+    original = {"source_file": "ticks.csv", "metadata": {"labels": ["canonical", "tick"]}}
+    event = QuoteEvent(
+        timestamp("2026-01-01T00:00:00Z"),
+        100,
+        101,
+        0,
+        original,
+    )
+    original["metadata"]["labels"].append("mutated")
+    original["metadata"]["frame"] = pd.DataFrame({"close": [100.0]})
+    original["new"] = "caller mutation"
+
+    assert event.provenance["source_file"] == "ticks.csv"
+    assert event.provenance["metadata"]["labels"] == ("canonical", "tick")
+    assert "frame" not in event.provenance["metadata"]
+    assert "new" not in event.provenance
+    with pytest.raises(TypeError):
+        event.provenance["source_file"] = "changed"
+    with pytest.raises(TypeError):
+        event.provenance["metadata"]["source"] = "changed"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pd.DataFrame({"close": [100.0]}),
+        pd.Series([100.0]),
+        pd.Index([100.0]),
+        {"nested": {"frame": pd.DataFrame({"close": [100.0]})}},
+        {"nested": [pd.Series([100.0])]},
+        {"unsupported": {1, 2}},
+    ],
+)
+def test_quote_provenance_rejects_unbounded_nested_payloads(payload):
+    with pytest.raises(TypeError):
+        QuoteEvent(
+            timestamp("2026-01-01T00:00:00Z"),
+            100,
+            101,
+            0,
+            {"metadata": payload},
+        )
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"x" * 4097: "value"},
+        {"metadata": "x" * 4097},
+    ],
+)
+def test_quote_provenance_rejects_oversized_keys_and_strings(provenance):
+    with pytest.raises(TypeError):
+        QuoteEvent(
+            timestamp("2026-01-01T00:00:00Z"),
+            100,
+            101,
+            0,
+            provenance,
+        )
+
+
 @pytest.mark.parametrize(
     ("bid", "ask"),
     [
@@ -230,6 +294,62 @@ def test_subject_identity_propagates_through_execution_records():
     identity = json.loads(result.entry_fill.execution_identity)
     assert identity == ["run-1", result.subject.subject_id, "market-entry"]
     assert engine.positions[0].entry_fill == result.entry_fill
+
+
+def test_fill_provenance_is_canonical_and_rejects_mutable_payloads():
+    entry_original = {"source_file": "ticks.csv", "metadata": {"source_row": 7}}
+    exit_original = {"source_file": "ticks.csv", "metadata": {"source_row": 9}}
+    entry_tick = QuoteEvent(
+        timestamp("2026-01-01T00:00:00Z"),
+        100,
+        101,
+        0,
+        {"source_file": "ticks.csv", "source_row": 6},
+    )
+    fill_tick = QuoteEvent(
+        timestamp("2026-01-01T00:00:01Z"),
+        101,
+        102,
+        1,
+        entry_original,
+    )
+    exit_tick = QuoteEvent(
+        timestamp("2026-01-01T00:00:02Z"),
+        103,
+        104,
+        2,
+        exit_original,
+    )
+    entry_original["metadata"]["source_row"] = 99
+    entry_original["metadata"]["frame"] = pd.DataFrame({"close": [100.0]})
+    exit_original["metadata"]["source_row"] = 99
+    _, results = execute(
+        [entry_tick, fill_tick, exit_tick],
+        [decision("2026-01-01T00:00:00Z", target=103)],
+    )
+    entry_fill = results[0].entry_fill
+    exit_fill = results[0].exit_fill
+
+    assert entry_fill.provenance["metadata"]["source_row"] == 7
+    assert entry_fill.timestamp == fill_tick.timestamp
+    assert entry_fill.source_order == fill_tick.source_order
+    assert exit_fill.provenance["metadata"]["source_row"] == 9
+    assert exit_fill.timestamp == exit_tick.timestamp
+    assert exit_fill.source_order == exit_tick.source_order
+    mutable_fill_provenance = {"metadata": {"labels": ["entry"]}}
+    independent_fill = replace(
+        entry_fill,
+        provenance=mutable_fill_provenance,
+    )
+    mutable_fill_provenance["metadata"]["labels"].append("caller mutation")
+    mutable_fill_provenance["metadata"]["frame"] = pd.DataFrame({"close": [100.0]})
+    assert independent_fill.provenance["metadata"]["labels"] == ("entry",)
+    assert "frame" not in independent_fill.provenance["metadata"]
+    with pytest.raises(TypeError):
+        replace(
+            entry_fill,
+            provenance={"nested": {"frame": pd.DataFrame({"close": [100.0]})}},
+        )
 
 
 def test_conflicting_same_availability_directions_create_no_intent():
@@ -328,8 +448,10 @@ def test_entry_quote_cannot_trigger_exit():
     assert results[0].entry_fill.observed_price == 102
     assert results[0].exit_fill is None
     assert engine.positions[0].state is PositionState.OPEN
-    assert results[0].status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+    assert results[0].status is ExecutionStatus.OPEN_AT_END_OF_INPUT
     assert results[0].net_realized_pnl is None
+    assert results[0].mark_to_market.side == "BID"
+    assert results[0].mark_to_market.price == 101
 
 
 def test_later_source_order_quote_at_fill_timestamp_can_trigger_exit():
@@ -372,6 +494,8 @@ def test_exit_sides_inclusive_triggers_and_actual_quote(
     assert results[0].exit_fill.timestamp == timestamp("2026-01-01T00:00:02Z")
     assert results[0].reason == terminal_reason
     assert results[0].position.state is PositionState.CLOSED
+    assert results[0].entry_fill.provenance["fixture"] == "test"
+    assert results[0].exit_fill.provenance["fixture"] == "test"
 
 
 def test_gap_uses_first_observed_later_quote_without_synthetic_fill():
@@ -434,16 +558,20 @@ def test_execution_record_identities_are_unique_within_a_closed_trade():
     assert len(set(identities)) == len(identities)
 
 
-def test_risk_uses_one_percent_of_pre_entry_equity_as_a_ceiling():
-    _, results = execute(
+def test_risk_sizing_derives_quantity_below_one_percent_ceiling():
+    engine, results = execute(
         [quote("2026-01-01T00:00:00Z", order=0), quote("2026-01-01T00:00:01Z", 100, 101, 1)],
         [decision("2026-01-01T00:00:00Z", stop=90, target=120, quantity=2)],
         initial_equity=10_000,
         execution_config=config(contract_size=10),
     )
-    assert results[0].status is ExecutionStatus.NO_TRADE_RISK_LIMIT
-    assert results[0].entry_fill is None
-    assert results[0].intent is not None
+    result = results[0]
+    assert result.entry_fill.quantity == 0.9
+    assert result.intent.requested_quantity == 0.9
+    assert result.intent.risk_budget == 100
+    assert result.intent.price_risk == 99
+    assert result.intent.price_risk <= result.intent.risk_budget
+    assert engine.positions[0].quantity == 0.9
 
 
 def test_position_at_exactly_one_percent_price_risk_is_accepted():
@@ -455,25 +583,22 @@ def test_position_at_exactly_one_percent_price_risk_is_accepted():
     )
     assert results[0].intent.risk_budget == 100
     assert results[0].entry_fill is not None
-    assert results[0].status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+    assert results[0].entry_fill.quantity == 1
+    assert results[0].intent.price_risk == 100
+    assert results[0].status is ExecutionStatus.OPEN_AT_END_OF_INPUT
 
 
-def test_any_positive_price_risk_above_one_percent_is_rejected():
+def test_risk_quantity_is_rounded_down_to_the_configured_step():
     _, results = execute(
         [quote("2026-01-01T00:00:00Z", order=0), quote("2026-01-01T00:00:01Z", 100, 101, 1)],
-        [
-            decision(
-                "2026-01-01T00:00:00Z",
-                stop=90.9999999999995,
-                target=120,
-                quantity=1,
-            )
-        ],
+        [decision("2026-01-01T00:00:00Z", stop=90, target=120, quantity=0.1)],
         initial_equity=10_000,
         execution_config=config(contract_size=10),
     )
-    assert results[0].status is ExecutionStatus.NO_TRADE_RISK_LIMIT
-    assert results[0].entry_fill is None
+    result = results[0]
+    assert result.entry_fill.quantity == 0.9
+    assert result.intent.price_risk == 99
+    assert result.intent.price_risk <= result.intent.risk_budget
 
 
 def test_accepted_intent_records_immediate_pre_entry_equity_and_risk_budget():
@@ -547,10 +672,12 @@ def test_nonzero_costs_do_not_reject_valid_price_risk_position():
         execution_config=config(commission=0.5, slippage=0.1),
     )
     result = results[0]
-    assert result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+    assert result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT
     assert result.intent.risk_budget == 100
-    assert result.entry_fill.commission_cost == 0.5
-    assert result.entry_fill.slippage_cost == 0.1
+    assert result.entry_fill.quantity == 9
+    assert result.entry_fill.commission_cost == 4.5
+    assert result.entry_fill.slippage_cost == pytest.approx(0.9)
+    assert result.intent.price_risk == 99
     assert not result.diagnostic_only
 
 
@@ -565,8 +692,10 @@ def test_commission_and_slippage_are_excluded_from_price_risk_ceiling():
         execution_config=config(contract_size=10, commission=60, slippage=50),
     )
     result = results[0]
-    assert result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+    assert result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT
     assert result.intent.risk_budget == 100
+    assert result.entry_fill.quantity == 1
+    assert result.intent.price_risk == 100
     assert result.entry_fill.commission_cost + result.entry_fill.slippage_cost == 110
     assert not result.diagnostic_only
 
@@ -578,56 +707,102 @@ def test_nonzero_costs_are_deducted_from_realized_pnl():
             quote("2026-01-01T00:00:01Z", 101, 102, 1),
             quote("2026-01-01T00:00:02Z", 110, 111, 2),
         ],
-        [decision("2026-01-01T00:00:00Z", stop=90, target=110, quantity=1)],
-        execution_config=config(commission=0.5, slippage=0.1),
+        [decision("2026-01-01T00:00:00Z", stop=92, target=110, quantity=1)],
+        execution_config=config(contract_size=10, commission=0.5, slippage=0.1),
     )
     result = results[0]
     assert result.status is ExecutionStatus.CLOSED
     assert result.entry_fill.observed_price == 102
     assert result.exit_fill.side == "BID"
     assert result.exit_fill.observed_price == 110
-    assert result.gross_realized_pnl == 8
+    assert result.gross_realized_pnl == 80
     assert result.cost_breakdown == {
         "entry_commission": 0.5,
         "entry_slippage": 0.1,
         "exit_commission": 0.5,
         "exit_slippage": 0.1,
     }
-    assert result.net_realized_pnl == pytest.approx(6.8)
+    assert result.net_realized_pnl == pytest.approx(78.8)
 
 
-@pytest.mark.parametrize("quantity", [0.05, 0.15], ids=["below-minimum", "off-step"])
-def test_quantity_must_meet_minimum_and_step(quantity):
-    _, results = execute(
-        [quote("2026-01-01T00:00:00Z", order=0), quote("2026-01-01T00:00:01Z", order=1)],
-        [decision("2026-01-01T00:00:00Z", quantity=quantity)],
-    )
-    assert results[0].status is ExecutionStatus.NO_TRADE_INVALID_QUANTITY
-    assert results[0].entry_fill is None
-
-
-def test_quantity_just_off_step_within_previous_tolerance_is_rejected():
+def test_no_legal_quantity_meets_minimum_under_one_percent_risk_ceiling():
     _, results = execute(
         [
             quote("2026-01-01T00:00:00Z", order=0),
             quote("2026-01-01T00:00:01Z", 100, 101, 1),
         ],
-        [decision("2026-01-01T00:00:00Z", quantity=0.10000000000005)],
+        [decision("2026-01-01T00:00:00Z", stop=0.5, target=120)],
+        execution_config=config(minimum_quantity=1.0, quantity_step=0.1),
     )
     assert results[0].status is ExecutionStatus.NO_TRADE_INVALID_QUANTITY
     assert results[0].entry_fill is None
+    assert results[0].position is None
+    assert results[0].intent.risk_budget == 100
 
 
-def test_exact_quantity_step_is_accepted():
+def test_exact_step_quantity_at_risk_ceiling_is_accepted():
     _, results = execute(
         [
             quote("2026-01-01T00:00:00Z", order=0),
             quote("2026-01-01T00:00:01Z", 100, 101, 1),
         ],
-        [decision("2026-01-01T00:00:00Z", quantity=0.3)],
+        [decision("2026-01-01T00:00:00Z", stop=91, target=120)],
+        execution_config=config(contract_size=10, quantity_step=0.1),
     )
-    assert results[0].entry_fill is not None
-    assert results[0].entry_fill.quantity == 0.3
+    assert results[0].entry_fill.quantity == 1
+    assert results[0].intent.price_risk == 100
+    assert results[0].intent.price_risk <= results[0].intent.risk_budget
+
+
+@pytest.mark.parametrize(
+    ("direction", "stop", "target", "final_bid", "final_ask", "expected_side"),
+    [
+        (ExecutionDirection.LONG, 91, 120, 105, 106, "BID"),
+        (ExecutionDirection.SHORT, 110, 90, 95, 96, "ASK"),
+    ],
+)
+def test_eof_open_position_records_side_correct_unrealized_valuation(
+    direction,
+    stop,
+    target,
+    final_bid,
+    final_ask,
+    expected_side,
+):
+    engine, results = execute(
+        [
+            quote("2026-01-01T00:00:00Z", 100, 101, 0),
+            quote("2026-01-01T00:00:01Z", 100, 101, 1),
+            quote(
+                "2026-01-01T00:00:02Z",
+                final_bid,
+                final_ask,
+                2,
+                source_row=3,
+            ),
+        ],
+        [decision("2026-01-01T00:00:00Z", direction, stop=stop, target=target)],
+        execution_config=config(contract_size=10),
+    )
+    result = results[0]
+    valuation = result.mark_to_market
+    assert result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT
+    assert result.position.state is PositionState.OPEN
+    assert result.position.exit_fill is None
+    assert result.exit_fill is None
+    assert result.gross_realized_pnl is None
+    assert result.net_realized_pnl is None
+    assert valuation.side == expected_side
+    assert valuation.price == (final_bid if expected_side == "BID" else final_ask)
+    assert valuation.timestamp == timestamp("2026-01-01T00:00:02Z")
+    assert valuation.source_order == 2
+    assert valuation.provenance["source_row"] == 3
+    assert valuation.unrealized_pnl == 40
+    assert result.unrealized_pnl == 40
+    assert result.gross_realized_pnl is None
+    assert result.net_realized_pnl is None
+    assert engine.valuations == [valuation]
+    assert engine.ending_equity == engine.initial_equity
 
 
 def test_risk_budget_uses_equity_after_prior_trade():
@@ -655,16 +830,19 @@ def test_risk_budget_uses_equity_after_prior_trade():
     second_result = by_subject[second.subject.subject_id]
     assert second_result.intent.account_equity_before_entry == 10_100
     assert second_result.intent.risk_budget == 101
-    assert second_result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
+    assert second_result.status is ExecutionStatus.OPEN_AT_END_OF_INPUT
 
 
-def test_missing_quantity_reports_unspecified_rounding_instead_of_guessing():
+def test_execution_derives_quantity_when_decision_quantity_is_missing():
     _, results = execute(
-        [quote("2026-01-01T00:00:00Z", order=0)],
+        [
+            quote("2026-01-01T00:00:00Z", order=0),
+            quote("2026-01-01T00:00:01Z", order=1),
+        ],
         [decision("2026-01-01T00:00:00Z", quantity=None)],
     )
-    assert results[0].status is ExecutionStatus.UNSPECIFIED_QUANTITY_ROUNDING
-    assert not results[0].intent
+    assert results[0].entry_fill is not None
+    assert results[0].entry_fill.quantity == 9
 
 
 def test_non_market_order_is_rejected_without_approximation():

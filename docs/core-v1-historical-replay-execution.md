@@ -97,7 +97,7 @@ Position:
 - The 1% ceiling applies to stop-loss price risk only: `price_risk = quantity * stop_distance * contract_value`, where `stop_distance` is the absolute distance between the executable entry price and stop-loss price, and `contract_value` includes configured contract size and account-currency conversion. A candidate MAY execute only when `price_risk <= risk_budget`.
 - Commission and slippage MUST NOT be included in `price_risk` or the 1% position-sizing ceiling. They MUST remain explicit execution costs and MUST be deducted separately from realized P&L.
 - Required execution configuration MUST explicitly provide contract size, minimum quantity, quantity step, and the point-value/account-currency conversion information needed to calculate risk and quantity. No implicit broker defaults are allowed. If required metadata is missing or invalid, reject with `NO_TRADE_INVALID_EXECUTION_CONTRACT`.
-- Quantity MUST comply with configured minimum quantity and quantity step, and the risk budget MUST NOT exceed 1% of pre-entry equity. Exact rounding behavior and the response when no valid quantity can satisfy both contract constraints and the risk ceiling are **UNSPECIFIED**.
+- At the first eligible entry quote, quantity MUST be derived from the actual executable entry price, configured stop-loss, pre-entry equity, contract size, account-currency conversion, and quantity step. The engine MUST calculate the largest step-aligned quantity whose stop-loss price risk does not exceed the 1% risk budget, rounding down with deterministic exact arithmetic. The resulting quantity MUST meet the configured minimum. If it does not, reject the intent as `NO_TRADE_INVALID_QUANTITY`; MUST NOT increase risk or force a trade. Any upstream decision quantity is non-authoritative for execution sizing.
 - The repository's existing account-balance-based `OrderManager.compute_position_size` does not define this new historical execution sizing rule and MUST NOT supply implicit contract metadata.
 
 ## 6. Market-Only Support and Unsupported Cases
@@ -168,11 +168,12 @@ The following are logical records; exact language types and serialization format
 | `DecisionRecord` | `ReplaySubject`, decision time equal to subject availability, strategy state, direction if any, evidence reference, reason |
 | `DecisionSet` | UTC availability/decision time, complete collection of independent decision records for that time, selected latest-base-bar candidate where applicable, arbitration status/reason; discarded same-direction decisions remain present and valid |
 | `ExecutionConfig` | Explicit contract size, minimum quantity, quantity step, point-value/account-currency conversion information, commission configuration, explicit slippage configuration (default zero for deterministic baseline), and financing configuration only if enabled |
-| `ExecutionIntent` | Collision-safe identity components (`execution_run_id`, originating `ReplaySubject.subject_id`, order discriminator), subject reference, decision time, direction, market order type, structural stop/target triggers, pre-entry equity and 1% risk budget, validated contract/sizing inputs, explicit cost configuration reference |
+| `ExecutionIntent` | Collision-safe identity components (`execution_run_id`, originating `ReplaySubject.subject_id`, order discriminator), subject reference, decision time, direction, market order type, structural stop/target triggers, derived quantity, pre-entry equity and 1% risk budget, price risk, validated contract/sizing inputs, explicit cost configuration reference |
 | `OrderRecord` | Order/intent ID, subject, status, eligible-after timestamp, selected order type, fill reference or NO TRADE/unfilled reason |
 | `FillRecord` | Unique fill ID, collision-safe execution identity, order ID, subject, event timestamp, source order/provenance, side (`ASK`/`BID`), observed price, quantity, explicit commission/slippage/costs |
 | `PositionRecord` | Unique position ID, originating subject/order, direction, entry fill, quantity, stop/target trigger levels, open/closed state, exit fill when closed |
-| `ExecutionResult` | Subject, decision/order/position references as applicable, final status, entry/exit fill references, gross/net realized P&L, cost breakdown, terminal reason |
+| `MarkToMarketValuation` | Open position ID, final observed quote timestamp/source order/provenance, executable mark side and price, unrealized price P&L |
+| `ExecutionResult` | Subject, decision/order/position references as applicable, final status, entry/exit fill references, gross/net realized P&L, separate EOF mark-to-market valuation, cost breakdown, terminal reason |
 
 Execution record identities MUST use a collision-safe namespace containing `execution_run_id + ReplaySubject.subject_id + order discriminator`. This identity MUST be traceable through order, fill, position, exit, and result records. `ReplaySubject.subject_id` remains the decision identity and MUST NOT itself be repurposed as a trade ID. Decision identity, execution intent, order, position, and trade are distinct entities. The exact serialization delimiter is an implementation detail; implementations MUST preserve the components without collisions.
 
@@ -183,7 +184,7 @@ Execution record identities MUST use a collision-safe namespace containing `exec
 - Commission and slippage are outside the 1% stop-loss price-risk ceiling; neither cost changes `risk_budget` or `price_risk`. Both are deducted separately when calculating net realized P&L.
 - Financing is not applied to Core v1.0 intraday positions unless explicitly configured. Configured financing, commission, and slippage values/models MUST be represented in the execution configuration and result cost breakdown.
 - Required point-value/account-currency conversion information MUST be explicitly configured; there are no implicit broker defaults. Gross P&L is derived from actual recorded entry and exit fills, direction, quantity, and the configured conversion information. Net P&L subtracts the explicit recorded costs.
-- Open positions and unfilled intents at end-of-input must not be marked to a synthetic price or reported as realized results. End-of-input reporting/valuation convention is **UNSPECIFIED**.
+- At EOF, an open position MUST remain open; the engine MUST NOT synthesize an exit, fill, or realized P&L. It MUST record a separate mark-to-market valuation using the final observed executable quote: BID for LONG and ASK for SHORT. Unrealized P&L is reported separately from realized P&L, is price-only, and MUST NOT be added to realized ending equity. Pending intents remain unfilled and MUST NOT receive a mark.
 
 ## 11. Compatibility Boundary
 
@@ -213,15 +214,16 @@ These are acceptance criteria for future implementation; this specification adds
 11. **Costs:** observed spread is represented by quote-side fills and is not double-counted; commission is explicit/configurable; slippage is explicit and may default to zero only for the deterministic baseline, not final validation; commission and slippage are excluded from the 1% stop-loss price-risk ceiling and deducted separately from realized P&L; financing is omitted unless configured.
 12. **Identity integrity:** collision-safe execution identity contains `execution_run_id`, subject ID, and order discriminator and remains traceable through order, fill, position, exit, and result; the subject ID itself is not a trade ID.
 13. **Legacy regression:** unchanged existing tests and outputs for `HistoricalReplay`, legacy batch replay, and OHLC research simulation continue to pass after future integration.
-14. **End of data:** open positions and pending intents are not assigned fabricated fills or realized P&L; terminal reporting follows an explicitly approved convention.
+14. **End of data:** pending intents remain unfilled; open positions remain open and receive a separate final-quote mark-to-market valuation (LONG BID, SHORT ASK), with unrealized P&L separate from realized P&L and no synthetic exit.
+15. **Risk-derived quantity:** quantity is calculated from the actual executable entry quote and stop-loss price risk, rounded down exactly to the configured step, and accepted only if it meets the minimum without exceeding the 1% ceiling; otherwise status is `NO_TRADE_INVALID_QUANTITY`.
 
 ## 13. Remaining Configuration and Implementation Details
 
 The execution policies previously listed as approval blockers are resolved by this specification. The following are required runtime configuration or implementation details, not permission to substitute defaults or change the approved policy:
 
 1. Each execution run must supply valid contract size, minimum quantity, quantity step, and point-value/account-currency conversion information. Missing or invalid required metadata produces `NO_TRADE_INVALID_EXECUTION_CONTRACT`.
-2. Quantity rounding behavior, and the reason/status when no legal quantity can satisfy both the configured quantity constraints and the 1% risk ceiling, remain **UNSPECIFIED**. Implementation must not exceed the ceiling while this detail is unresolved.
+2. Risk sizing uses the actual entry-side quote and exact decimal interpretations of configured numeric values; it floors the risk capacity to a whole quantity-step count. A result below minimum quantity produces `NO_TRADE_INVALID_QUANTITY`.
 3. Commission values/models must be explicitly configured. Slippage must be an explicit input, with zero permitted only for the deterministic baseline. Financing is disabled unless explicitly configured.
-4. End-of-input reporting for open positions remains **UNSPECIFIED**; open positions must not be represented as realized or synthetically priced results.
+4. EOF valuation uses the last observed quote and records gross price-only unrealized P&L separately. It does not close the position, create a fill, deduct hypothetical exit costs, or change realized ending equity.
 
-No execution code, existing-module changes, tests, commits, or pushes are included in this specification-only change.
+These policies close the prior quantity-rounding, no-legal-quantity, and open-position EOF valuation governance items.

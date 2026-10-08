@@ -102,6 +102,42 @@ def test_empty_lifecycle_and_finish_rejects_future_input():
         }))
 
 
+def test_replay_bar_availability_aliases_must_match():
+    bar = _bar("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z")
+    replay = _replay()
+    replay.feed_group(_group("2026-01-01T00:01:00Z", **{"1min": (bar,)}))
+
+    mismatch = IncrementalReplayBar(
+        **{
+            **bar.__dict__,
+            "availability_ts": _ts("2026-01-01T00:01:01Z"),
+        }
+    )
+    with pytest.raises(ValueError, match="same timestamp"):
+        _replay().feed_group(
+            _group("2026-01-01T00:01:00Z", **{"1min": (mismatch,)})
+        )
+
+
+def test_replay_bar_availability_aliases_compare_after_utc_normalization():
+    bar = _bar("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z")
+    equivalent = IncrementalReplayBar(
+        **{
+            **bar.__dict__,
+            "available_at": pd.Timestamp("2025-12-31T19:01:00-05:00"),
+            "availability_ts": _ts("2026-01-01T00:01:00Z"),
+        }
+    )
+
+    replay = _replay()
+    accepted = replay.feed_group(
+        _group("2026-01-01T00:01:00Z", **{"1min": (equivalent,)})
+    )
+
+    assert accepted is None
+    assert replay.pending_group_count == 1
+
+
 def test_finish_requires_pending_groups_to_be_drained():
     replay = _replay()
     replay.feed_group(_group(

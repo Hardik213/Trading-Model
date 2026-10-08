@@ -5,11 +5,13 @@ import math
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Iterable, Mapping, Protocol, Sequence
 
 import pandas as pd
 
+from .evidence_timing import validate_bounded_payload
 from .replay_subject import ReplaySubject
 
 
@@ -30,14 +32,11 @@ class ExecutionStatus(str, Enum):
     NO_TRADE_INVALID_GEOMETRY = "NO_TRADE_INVALID_GEOMETRY"
     NO_TRADE_INVALID_QUANTITY = "NO_TRADE_INVALID_QUANTITY"
     NO_TRADE_RISK_LIMIT = "NO_TRADE_RISK_LIMIT"
-    UNSPECIFIED_QUANTITY_ROUNDING = "UNSPECIFIED_QUANTITY_ROUNDING"
     INTENT_CREATED = "INTENT_CREATED"
     FILLED_OPEN = "FILLED_OPEN"
     CLOSED = "CLOSED"
     UNFILLED_AT_END_OF_INPUT = "UNFILLED_AT_END_OF_INPUT"
-    OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION = (
-        "OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION"
-    )
+    OPEN_AT_END_OF_INPUT = "OPEN_AT_END_OF_INPUT"
 
 
 class PositionState(str, Enum):
@@ -83,6 +82,51 @@ def _quantity_matches_step(quantity: float, step: float) -> bool:
     ) == 0
 
 
+def _exact_fraction(value: float | int) -> Fraction:
+    return Fraction(Decimal(str(value)))
+
+
+def _risk_sized_quantity(
+    *,
+    entry_price: float,
+    stop_loss: float,
+    equity_before_entry: float,
+    config: ExecutionConfig,
+) -> tuple[float | None, float, float | None]:
+    risk_budget = _exact_fraction(equity_before_entry) * Fraction(1, 100)
+    risk_per_unit = (
+        abs(_exact_fraction(entry_price) - _exact_fraction(stop_loss))
+        * _exact_fraction(float(config.contract_size))
+        * _exact_fraction(float(config.account_currency_conversion))
+    )
+    step = _exact_fraction(float(config.quantity_step))
+    minimum = _exact_fraction(float(config.minimum_quantity))
+    risk_per_step = risk_per_unit * step
+    if risk_per_step <= 0:
+        return None, float(risk_budget), None
+
+    step_count = risk_budget // risk_per_step
+    quantity = step_count * step
+    if quantity < minimum:
+        return None, float(risk_budget), None
+
+    try:
+        quantity_float = float(quantity)
+    except OverflowError:
+        return None, float(risk_budget), None
+    if not math.isfinite(quantity_float) or quantity_float <= 0:
+        return None, float(risk_budget), None
+    represented_quantity = _exact_fraction(quantity_float)
+    price_risk = represented_quantity * risk_per_unit
+    if (
+        not _quantity_matches_step(quantity_float, float(config.quantity_step))
+        or represented_quantity < minimum
+        or price_risk > risk_budget
+    ):
+        return None, float(risk_budget), None
+    return quantity_float, float(risk_budget), float(price_risk)
+
+
 def _execution_identity(
     execution_run_id: str,
     subject_id: str,
@@ -117,7 +161,10 @@ class QuoteEvent:
             raise ValueError("Quote provenance must be a non-empty mapping.")
         object.__setattr__(self, "bid", float(self.bid))
         object.__setattr__(self, "ask", float(self.ask))
-        object.__setattr__(self, "provenance", MappingProxyType(dict(self.provenance)))
+        provenance = validate_bounded_payload(self.provenance, "Quote provenance")
+        if not isinstance(provenance, Mapping):
+            raise TypeError("Quote provenance must be a mapping.")
+        object.__setattr__(self, "provenance", provenance)
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, object]) -> QuoteEvent:
@@ -237,10 +284,11 @@ class ExecutionIntent:
     order_type: str
     stop_loss: float
     take_profit: float
-    requested_quantity: float
+    requested_quantity: float | None
     account_equity_before_entry: float | None
     risk_budget: float | None
     cost_configuration: ExecutionConfig
+    price_risk: float | None = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +319,14 @@ class FillRecord:
     commission_cost: float
     slippage_cost: float
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.provenance, Mapping) or not self.provenance:
+            raise ValueError("Fill provenance must be a non-empty mapping.")
+        provenance = validate_bounded_payload(self.provenance, "Fill provenance")
+        if not isinstance(provenance, Mapping):
+            raise TypeError("Fill provenance must be a mapping.")
+        object.__setattr__(self, "provenance", provenance)
+
     @property
     def total_cost(self) -> float:
         return self.commission_cost + self.slippage_cost
@@ -294,6 +350,24 @@ class PositionRecord:
 
 
 @dataclass(frozen=True)
+class MarkToMarketValuation:
+    position_id: str
+    timestamp: pd.Timestamp
+    source_order: int
+    provenance: Mapping[str, object]
+    side: str
+    price: float
+    unrealized_pnl: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timestamp", _utc_timestamp(self.timestamp, "timestamp"))
+        provenance = validate_bounded_payload(self.provenance, "Valuation provenance")
+        if not isinstance(provenance, Mapping):
+            raise TypeError("Valuation provenance must be a mapping.")
+        object.__setattr__(self, "provenance", provenance)
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     subject: ReplaySubject
     decision: DecisionRecord
@@ -308,11 +382,20 @@ class ExecutionResult:
     exit_fill: FillRecord | None = None
     gross_realized_pnl: float | None = None
     net_realized_pnl: float | None = None
+    mark_to_market: MarkToMarketValuation | None = None
     cost_breakdown: Mapping[str, float] = field(default_factory=dict)
     diagnostic_only: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cost_breakdown", MappingProxyType(dict(self.cost_breakdown)))
+
+    @property
+    def unrealized_pnl(self) -> float | None:
+        return (
+            self.mark_to_market.unrealized_pnl
+            if self.mark_to_market is not None
+            else None
+        )
 
 
 @dataclass
@@ -329,6 +412,7 @@ class _ResultState:
     exit_fill: FillRecord | None = None
     gross_realized_pnl: float | None = None
     net_realized_pnl: float | None = None
+    mark_to_market: MarkToMarketValuation | None = None
     cost_breakdown: dict[str, float] = field(default_factory=dict)
 
 
@@ -356,12 +440,14 @@ class ExecutionEngine:
         self.orders: list[OrderRecord] = []
         self.fills: list[FillRecord] = []
         self.positions: list[PositionRecord] = []
+        self.valuations: list[MarkToMarketValuation] = []
         self.results: tuple[ExecutionResult, ...] = ()
         self._has_run = False
         self._incremental_started = False
         self._incremental_finished = False
         self._incremental_current_timestamp: pd.Timestamp | None = None
         self._incremental_previous_source_order: int | None = None
+        self._last_tick: QuoteEvent | None = None
         self._incremental_pending: tuple[ExecutionIntent, _ResultState] | None = None
         self._incremental_active: tuple[PositionRecord, _ResultState] | None = None
         self._incremental_states: dict[str, _ResultState] = {}
@@ -408,6 +494,7 @@ class ExecutionEngine:
                 raise ValueError("Tick source_order must be strictly increasing.")
             previous_timestamp = tick.timestamp
             previous_source_order = tick.source_order
+            self._last_tick = tick
 
             if group_index < len(group_times) and group_times[group_index] < tick.timestamp:
                 raise ValueError("A decision availability group has no tick at its timestamp.")
@@ -443,8 +530,13 @@ class ExecutionEngine:
         if active is not None:
             position, state = active
             state.position = position
-            state.status = ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
-            state.reason = "Open-position end-of-input valuation is UNSPECIFIED; no mark was created."
+            if self._last_tick is None:
+                raise RuntimeError("An open position cannot exist without an observed quote.")
+            valuation = self._mark_to_market(position, self._last_tick)
+            self.valuations.append(valuation)
+            state.mark_to_market = valuation
+            state.status = ExecutionStatus.OPEN_AT_END_OF_INPUT
+            state.reason = "Position remains open; final executable quote recorded as unrealized P&L."
 
         self.ending_equity = self._equity
         self.results = tuple(
@@ -462,6 +554,7 @@ class ExecutionEngine:
                 exit_fill=states[decision.subject.subject_id].exit_fill,
                 gross_realized_pnl=states[decision.subject.subject_id].gross_realized_pnl,
                 net_realized_pnl=states[decision.subject.subject_id].net_realized_pnl,
+                mark_to_market=states[decision.subject.subject_id].mark_to_market,
                 cost_breakdown=states[decision.subject.subject_id].cost_breakdown,
                 diagnostic_only=(
                     self.config.costs_are_valid
@@ -495,6 +588,7 @@ class ExecutionEngine:
         self._incremental_started = True
         self._incremental_current_timestamp = tick.timestamp
         self._incremental_previous_source_order = tick.source_order
+        self._last_tick = tick
         if self._incremental_active is not None:
             self._incremental_active = self._monitor_position(self._incremental_active, tick)
         if (
@@ -586,8 +680,13 @@ class ExecutionEngine:
         if self._incremental_active is not None:
             position, state = self._incremental_active
             state.position = position
-            state.status = ExecutionStatus.OPEN_AT_END_OF_INPUT_UNSPECIFIED_VALUATION
-            state.reason = "Open-position end-of-input valuation is UNSPECIFIED; no mark was created."
+            if self._last_tick is None:
+                raise RuntimeError("An open position cannot exist without an observed quote.")
+            valuation = self._mark_to_market(position, self._last_tick)
+            self.valuations.append(valuation)
+            state.mark_to_market = valuation
+            state.status = ExecutionStatus.OPEN_AT_END_OF_INPUT
+            state.reason = "Position remains open; final executable quote recorded as unrealized P&L."
 
         self.ending_equity = self._equity
         self.results = tuple(
@@ -609,6 +708,9 @@ class ExecutionEngine:
                 net_realized_pnl=self._incremental_states[
                     decision.subject.subject_id
                 ].net_realized_pnl,
+                mark_to_market=self._incremental_states[
+                    decision.subject.subject_id
+                ].mark_to_market,
                 cost_breakdown=self._incremental_states[
                     decision.subject.subject_id
                 ].cost_breakdown,
@@ -724,15 +826,6 @@ class ExecutionEngine:
             state.status = ExecutionStatus.NO_TRADE_INVALID_GEOMETRY
             state.reason = "Finite positive stop-loss and take-profit triggers are required."
             return pending, active
-        if decision.quantity is None:
-            state.status = ExecutionStatus.UNSPECIFIED_QUANTITY_ROUNDING
-            state.reason = "No quantity supplied; quantity rounding policy is UNSPECIFIED."
-            return pending, active
-        if not _finite_positive(decision.quantity):
-            state.status = ExecutionStatus.NO_TRADE_INVALID_QUANTITY
-            state.reason = state.status.value
-            return pending, active
-
         subject = decision.subject
         intent_id = _execution_identity(self.execution_run_id, subject.subject_id, "market-entry/intent")
         order_id = _execution_identity(self.execution_run_id, subject.subject_id, "market-entry/order")
@@ -746,7 +839,7 @@ class ExecutionEngine:
             order_type=decision.order_type,
             stop_loss=float(decision.stop_loss),
             take_profit=float(decision.take_profit),
-            requested_quantity=float(decision.quantity),
+            requested_quantity=None,
             account_equity_before_entry=None,
             risk_budget=None,
             cost_configuration=self.config,
@@ -780,20 +873,6 @@ class ExecutionEngine:
             return pending, active
 
         config = intent.cost_configuration
-        quantity = intent.requested_quantity
-        if quantity < float(config.minimum_quantity):
-            state.status = ExecutionStatus.NO_TRADE_INVALID_QUANTITY
-            state.reason = "Quantity is below the configured minimum."
-            self._replace_order(intent.order_id, status=state.status.value, reason=state.reason)
-            state.order = self._order_by_id(intent.order_id)
-            return None, active
-        if not _quantity_matches_step(quantity, float(config.quantity_step)):
-            state.status = ExecutionStatus.NO_TRADE_INVALID_QUANTITY
-            state.reason = "Quantity does not conform to the configured quantity step."
-            self._replace_order(intent.order_id, status=state.status.value, reason=state.reason)
-            state.order = self._order_by_id(intent.order_id)
-            return None, active
-
         price = tick.ask if intent.direction is ExecutionDirection.LONG else tick.bid
         geometry_valid = (
             intent.stop_loss < price < intent.take_profit
@@ -808,24 +887,39 @@ class ExecutionEngine:
             return None, active
 
         equity_before_entry = self._equity
-        risk_budget = equity_before_entry * 0.01
-        risk_amount = (
-            abs(price - intent.stop_loss)
-            * float(config.contract_size)
-            * float(config.account_currency_conversion)
-            * quantity
+        quantity, risk_budget, price_risk = _risk_sized_quantity(
+            entry_price=price,
+            stop_loss=intent.stop_loss,
+            equity_before_entry=equity_before_entry,
+            config=config,
         )
-        if risk_amount > risk_budget:
-            state.status = ExecutionStatus.NO_TRADE_RISK_LIMIT
-            state.reason = f"Configured quantity risks {risk_amount:g}, above 1% budget {risk_budget:g}."
+        if quantity is None:
+            state.status = ExecutionStatus.NO_TRADE_INVALID_QUANTITY
+            state.reason = (
+                "No quantity at the configured step meets the minimum without exceeding "
+                "the 1% stop-loss price-risk budget."
+            )
             self._replace_order(intent.order_id, status=state.status.value, reason=state.reason)
             state.order = self._order_by_id(intent.order_id)
+            intent_index = next(
+                index for index, existing in enumerate(self.intents)
+                if existing.intent_id == intent.intent_id
+            )
+            intent = replace(
+                intent,
+                account_equity_before_entry=equity_before_entry,
+                risk_budget=risk_budget,
+            )
+            self.intents[intent_index] = intent
+            state.intent = intent
             return None, active
 
         intent = replace(
             intent,
+            requested_quantity=quantity,
             account_equity_before_entry=equity_before_entry,
             risk_budget=risk_budget,
+            price_risk=price_risk,
         )
         intent_index = next(
             index for index, existing in enumerate(self.intents)
@@ -964,6 +1058,39 @@ class ExecutionEngine:
         state.cost_breakdown.update({"exit_commission": commission, "exit_slippage": slippage})
         return None
 
+    def _mark_to_market(
+        self,
+        position: PositionRecord,
+        tick: QuoteEvent,
+    ) -> MarkToMarketValuation:
+        if position.direction is ExecutionDirection.LONG:
+            side = "BID"
+            price = tick.bid
+            sign = 1
+        else:
+            side = "ASK"
+            price = tick.ask
+            sign = -1
+        unrealized_pnl = (
+            sign
+            * (
+                _exact_fraction(price)
+                - _exact_fraction(position.entry_fill.observed_price)
+            )
+            * _exact_fraction(position.quantity)
+            * _exact_fraction(float(self.config.contract_size))
+            * _exact_fraction(float(self.config.account_currency_conversion))
+        )
+        return MarkToMarketValuation(
+            position_id=position.position_id,
+            timestamp=tick.timestamp,
+            source_order=tick.source_order,
+            provenance=tick.provenance,
+            side=side,
+            price=price,
+            unrealized_pnl=float(unrealized_pnl),
+        )
+
     def _order_by_id(self, order_id: str) -> OrderRecord:
         return next(order for order in self.orders if order.order_id == order_id)
 
@@ -995,6 +1122,7 @@ __all__ = [
     "ExecutionResult",
     "ExecutionStatus",
     "FillRecord",
+    "MarkToMarketValuation",
     "OrderRecord",
     "PositionRecord",
     "PositionState",

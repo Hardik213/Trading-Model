@@ -250,6 +250,15 @@ class IncrementalHistoricalReplay:
                 raise TypeError("Availability groups must contain IncrementalReplayBar values.")
             if any(bar.timeframe != timeframe for bar in bars):
                 raise ValueError("Bar timeframe does not match its availability-group key.")
+            if any(
+                bar.availability_ts is not None
+                and _require_utc(bar.availability_ts, "availability_ts")
+                != _require_utc(bar.available_at, "bar availability")
+                for bar in bars
+            ):
+                raise ValueError(
+                    "available_at and availability_ts must identify the same timestamp."
+                )
             if any(_require_utc(bar.available_at, "bar availability") != availability for bar in bars):
                 raise ValueError("Every bar in a group must share its group availability timestamp.")
 
