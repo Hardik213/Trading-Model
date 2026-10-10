@@ -16,7 +16,10 @@ from .core_v1_evidence import (
     SubjectVisibleInputs,
     SubjectVisibleObservation,
 )
-from .core_v1_pipeline import CoreV1PipelineResult
+from .core_v1_pipeline import (
+    CoreV1PipelineResult,
+    evaluate_core_v1_pipeline,
+)
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from .replay_engine import IncrementalHistoricalReplay
 from .replay_subject import ReplaySubject, same_subject_id
@@ -75,15 +78,24 @@ class CoreV1TickExecution:
         aggregators: Mapping[str, TickAggregator],
         replay: IncrementalHistoricalReplay,
         execution: ExecutionEngine,
-        pipeline_builder: PipelineBuilder,
+        pipeline_builder: PipelineBuilder | None = None,
+        allow_custom_pipeline_builder: bool = False,
         evidence_enricher: EvidenceEnricher | None = None,
         quantity_provider: QuantityProvider | None = None,
         order_type: str = "MARKET",
     ) -> None:
         if not isinstance(execution, ExecutionEngine):
             raise TypeError("execution must be the existing stateful ExecutionEngine.")
-        if not callable(pipeline_builder):
+        if type(allow_custom_pipeline_builder) is not bool:
+            raise TypeError("allow_custom_pipeline_builder must be a bool.")
+        if pipeline_builder is None:
+            pipeline_builder = evaluate_core_v1_pipeline
+        elif not callable(pipeline_builder):
             raise TypeError("pipeline_builder must be callable.")
+        elif not allow_custom_pipeline_builder:
+            raise ValueError(
+                "A custom pipeline_builder requires allow_custom_pipeline_builder=True."
+            )
         if evidence_enricher is not None and not callable(evidence_enricher):
             raise TypeError("evidence_enricher must be callable or None.")
         if quantity_provider is not None and not callable(quantity_provider):

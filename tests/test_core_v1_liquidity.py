@@ -1648,7 +1648,6 @@ def test_production_visible_inputs_are_truncation_invariant_on_development_ticks
         aggregators={timeframe: TickAggregator(timeframe)},
         replay=replay,
         execution=execution,
-        pipeline_builder=lambda visible: None,
     )
     for interval_start, events in tick_events_by_interval.items():
         integration._ticks_by_interval[timeframe][interval_start].extend(events)

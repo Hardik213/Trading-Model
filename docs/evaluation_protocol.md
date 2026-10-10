@@ -23,7 +23,7 @@ Historical bars and decisions must follow the repository's actual replay semanti
 
 Data before a period's inclusive start may be used only as causal warm-up/context if required by the frozen strategy and replay. It cannot create a counted decision, entry, trade, or performance observation before the period. A trade is attributed to the evaluation period, UTC year, and session of its actual entry-fill timestamp. The holdout is not a development or debugging interval.
 
-**Historical holdout exposure:** The owner confirms that only raw-data presence and integrity were checked on 2025 data; no strategy outcomes, performance metrics, or charts were inspected while designing or selecting rules. This is an owner attestation, not technical sealing or independent proof of all prior activity. Retain the access prohibition below. If contrary records emerge, document them and reassess whether 2025 can serve as an untouched holdout before authorizing evaluation.
+**Historical holdout exposure:** The owner confirms that only raw-data presence and integrity were checked on 2025. No strategy outcomes, metrics or charts were inspected. Do not describe the holdout status as unknown. The holdout prohibition still applies. This is an owner attestation, not technical sealing or independent proof of all prior activity. Retain the access prohibition below. If contrary records emerge, document them and reassess whether 2025 can serve as an untouched holdout before authorizing evaluation.
 
 ## 2. Holdout access and freeze gate
 
@@ -40,6 +40,8 @@ Data before a period's inclusive start may be used only as causal warm-up/contex
 ### Technical controls versus promises
 
 These are procedural governance rules, not an access-control boundary. The source code, raw data, reports, and local filesystem remain technically accessible to repository users and tools. No encrypted dataset, permission gate, or automated prevention of reading 2025 outcomes is implemented or claimed. Before an authorized final run, enforce the procedure through review, restricted result handling, and audit records. The data-integrity verifier can inspect/hash raw 2025 files but must not calculate strategy outcomes.
+
+The canonical tick-to-decision integration uses `evaluate_core_v1_pipeline` by default. Supplying a custom pipeline builder requires explicit `allow_custom_pipeline_builder=True`; that opt-in can bypass canonical pipeline composition and is prohibited for development or holdout evaluation. Any diagnostic/test use of an opted-in custom builder must record its identity. Direct calls to public component evaluators remain possible; the builder default does not prevent alternate direct-call paths, whose evidence validation is governed by each evaluator's own contract.
 
 ### Pre-run freeze record
 

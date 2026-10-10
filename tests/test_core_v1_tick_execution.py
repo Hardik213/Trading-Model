@@ -9,9 +9,20 @@ import pytest
 from src.core_v1_dealing_range import build_dealing_range_context
 from src.core_v1_decision_bridge import CoreV1QuantityInput
 from src.core_v1_evidence import SubjectVisibleInputs
+from src.core_v1_liquidity import (
+    CoreV1LiquidityAssessment,
+    CoreV1LiquidityBreach,
+    CoreV1LiquidityReaction,
+    ReactionKind,
+    SweepKind,
+    detect_core_v1_liquidity_levels,
+)
+from src.core_v1_mss import evaluate_core_v1_mss
 from src.core_v1_pipeline import CoreV1PipelineResult
+from src.core_v1_pipeline import evaluate_core_v1_pipeline
 from src.core_v1_tick_execution import CoreV1TickExecution
 from src.displacement import Direction
+from src.evidence_timing import EvidenceTiming
 from src.ict2022_engine import SetupState
 from src.market_structure import LiquiditySide
 from src.replay_engine import IncrementalHistoricalReplay, ReplayConfig
@@ -20,11 +31,13 @@ from src.sniper_setup import PrecisionState
 from src.tick_aggregation import TickAggregator
 from src.tick_execution import (
     ExecutionConfig,
+    ExecutionDirection,
     ExecutionEngine,
     ExecutionStatus,
     QuoteEvent,
 )
 from tests.test_core_v1_pipeline import pipeline_fixture
+from tests.test_core_v1_retracement import FixedEntryResolver
 
 
 def ts(value: str) -> pd.Timestamp:
@@ -151,6 +164,7 @@ def integration(
     replay_engine=None,
     execution_engine=None,
     pipeline_builder=None,
+    allow_custom_pipeline_builder=False,
     evidence_enricher=None,
     quantity_provider=None,
     order_type="MARKET",
@@ -160,6 +174,7 @@ def integration(
         replay=replay_engine or replay(),
         execution=execution_engine or engine(),
         pipeline_builder=pipeline_builder,
+        allow_custom_pipeline_builder=allow_custom_pipeline_builder,
         evidence_enricher=evidence_enricher,
         quantity_provider=quantity_provider,
         order_type=order_type,
@@ -199,65 +214,213 @@ def incomplete_builder(inputs):
     )
 
 
+def test_pipeline_builder_defaults_to_canonical_evaluator():
+    instance = integration()
+
+    assert instance.pipeline_builder is evaluate_core_v1_pipeline
+
+
+def test_custom_pipeline_builder_requires_explicit_opt_in():
+    with pytest.raises(ValueError, match="requires allow_custom_pipeline_builder=True"):
+        integration(pipeline_builder=incomplete_builder)
+
+
+def test_explicitly_opted_in_pipeline_builder_is_invoked():
+    observed = []
+
+    def builder(inputs):
+        observed.append(inputs)
+        return incomplete_builder(inputs)
+
+    instance = integration(
+        pipeline_builder=builder,
+        allow_custom_pipeline_builder=True,
+    )
+    instance.run(
+        [
+            tick("2026-01-01T10:00:05Z", 0),
+            tick("2026-01-01T10:01:05Z", 1),
+        ]
+    )
+
+    assert len(observed) == 1
+    assert isinstance(observed[0], SubjectVisibleInputs)
+
+
+def short_pipeline_from_visible_bars(inputs, source_kwargs, template, template_subject):
+    inputs = add_fixture_evidence(inputs, source_kwargs["inputs"])
+    updates = {
+        "liquidity-level": {"low": 96.0},
+        "liquidity-level-right-2": {"low": 97.0},
+    }
+    base_observations = []
+    for observation in inputs.base_observations:
+        source_id = observation.timing.source_observations[0].source_id
+        if source_id in updates:
+            values = dict(observation.value)
+            values.update(updates[source_id])
+            observation = replace(observation, value=values)
+        base_observations.append(observation)
+    inputs = replace(
+        inputs,
+        base_observations=tuple(
+            sorted(base_observations, key=lambda item: item.timing.event_timestamp)
+        ),
+    )
+
+    level_candidates = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.side is LiquiditySide.SSL
+        and candidate.timing.event_timestamp == ts("2026-01-01T10:00:30Z")
+    )
+    assert len(level_candidates) == 1
+    (level,) = level_candidates
+
+    breach_observation = next(
+        observation
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp == ts("2026-01-01T10:01:00Z")
+    )
+    breach_source = breach_observation.timing.source_observations[0]
+    breach_timing = EvidenceTiming.from_inputs(
+        event_timestamp=breach_source.event_timestamp,
+        source_observations=(*level.timing.source_observations, breach_source),
+        provenance={"test_fixture": "visible SSL breach bar"},
+        base_bar_scoped=True,
+    )
+    breach = CoreV1LiquidityBreach(
+        subject=inputs.subject,
+        level=level,
+        price=float(breach_observation.value["low"]),
+        timing=breach_timing,
+    )
+
+    reaction_observation = next(
+        observation
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp == ts("2026-01-01T10:01:30Z")
+    )
+    reaction_source = reaction_observation.timing.source_observations[0]
+    reaction_timing = EvidenceTiming.from_inputs(
+        event_timestamp=breach.timing.event_timestamp,
+        confirmation_timestamp=reaction_source.event_timestamp,
+        source_observations=(
+            *breach.timing.source_observations,
+            reaction_source,
+        ),
+        provenance={"test_fixture": "visible SSL rejection bar"},
+        base_bar_scoped=True,
+    )
+    reaction = CoreV1LiquidityReaction(
+        subject=inputs.subject,
+        breach=breach,
+        kind=ReactionKind.REJECTION,
+        timing=reaction_timing,
+        price=float(reaction_observation.value["high"]),
+    )
+    liquidity = CoreV1LiquidityAssessment(
+        subject=inputs.subject,
+        level=level,
+        breach=breach,
+        reaction=reaction,
+        sweep=SweepKind.UNRESOLVED,
+    )
+
+    rebound = rebind_subject(template, template_subject, inputs.subject)
+    short_displacement = replace(
+        rebound.displacement,
+        observation=replace(
+            rebound.displacement.observation,
+            direction=Direction.BEARISH,
+        ),
+    )
+    short_break = replace(
+        rebound.mss.structural_break,
+        direction=Direction.BEARISH,
+    )
+    short_confirmation = replace(
+        rebound.mss.confirmation,
+        structural_break=short_break,
+    )
+    short_mss = evaluate_core_v1_mss(
+        inputs,
+        structural_point=rebound.mss.structural_point,
+        liquidity_event=liquidity,
+        displacement=short_displacement,
+        structural_break=short_break,
+        confirmation=short_confirmation,
+    )
+
+    selection_sources = tuple(
+        source
+        for source in rebound.target.timing.source_observations
+        if source not in rebound.target.liquidity_level.timing.source_observations
+    )
+    short_target = replace(
+        rebound.target,
+        liquidity_level=level,
+        timing=replace(
+            rebound.target.timing,
+            event_timestamp=level.timing.event_timestamp,
+            source_observations=(*level.timing.source_observations, *selection_sources),
+        ),
+    )
+    short_invalidation = replace(rebound.invalidation, price=115.0)
+    planned_entry = rebound.retracement.planned_entry
+    return evaluate_core_v1_pipeline(
+        inputs,
+        context=rebound.context,
+        liquidity=liquidity,
+        displacement=short_displacement,
+        mss=short_mss,
+        zone=rebound.zone,
+        interaction=rebound.interaction,
+        entry_resolver=FixedEntryResolver(planned_entry),
+        invalidation=short_invalidation,
+        target=short_target,
+        opposing_liquidity_levels=(level,),
+    )
+
+
 def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
     source_kwargs, template = template_fixture()
     template_subject = template.subject
     release_at = ts("2026-01-01T10:09:05Z")
 
     def build(inputs):
-        rebound = rebind_subject(template, template_subject, inputs.subject)
-        short_displacement = replace(
-            rebound.displacement,
-            observation=replace(
-                rebound.displacement.observation,
-                direction=Direction.BEARISH,
-            ),
+        if inputs.subject.base_bar_timestamp.minute == 7:
+            return rebind_subject(template, template_subject, inputs.subject)
+        short_result = short_pipeline_from_visible_bars(
+            source_kwargs["inputs"],
+            source_kwargs,
+            template,
+            template_subject,
         )
-        short_break = replace(
-            rebound.mss.structural_break,
-            direction=Direction.BEARISH,
-        )
-        short_confirmation = replace(
-            rebound.mss.confirmation,
-            structural_break=short_break,
-        )
-        short_mss = replace(
-            rebound.mss,
-            displacement=short_displacement,
-            structural_break=short_break,
-            confirmation=short_confirmation,
-        )
-        short_entry = replace(
-            rebound.retracement,
-            displacement=short_displacement,
-            mss=short_mss,
-        )
-        short_level = replace(
-            rebound.target.liquidity_level,
-            side=LiquiditySide.SSL,
-            price=95.0,
-        )
-        short_target = replace(rebound.target, liquidity_level=short_level)
-        short_invalidation = replace(rebound.invalidation, price=105.0)
-        short_hypothesis = replace(
-            rebound.hypothesis,
-            direction=Direction.BEARISH,
-            planned_entry=short_entry,
-            invalidation=short_invalidation,
-            target=short_target,
-        )
-        return replace(
-            rebound,
-            displacement=short_displacement,
-            mss=short_mss,
-            retracement=short_entry,
-            invalidation=short_invalidation,
-            target=short_target,
-            opposing_liquidity_levels=(short_level,),
-            hypothesis=short_hypothesis,
+        return rebind_subject(
+            short_result,
+            source_kwargs["inputs"].subject,
+            inputs.subject,
         )
 
+    class DirectionCheckingExecution(ExecutionEngine):
+        def submit_decision_set(self, decision_set):
+            actionable = [
+                item for item in decision_set.decisions if item.actionable
+            ]
+            assert len(actionable) == 2
+            assert {item.direction for item in actionable} == {
+                ExecutionDirection.LONG,
+                ExecutionDirection.SHORT,
+            }
+            super().submit_decision_set(decision_set)
+
     instance = integration(
+        execution_engine=DirectionCheckingExecution(
+            execution_run_id="genuine-direction-conflict",
+            initial_equity=10_000.0,
+            config=engine().config,
+        ),
         tick_aggregators={"1min": delayed_aggregator("1min", release_at)},
         pipeline_builder=lambda inputs: (
             rebind_subject(template, template_subject, inputs.subject)
@@ -269,6 +432,7 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
             source_kwargs["inputs"],
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -280,7 +444,9 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
 
     decisions = report.decision_sets[0].decisions
     assert len(decisions) == 2
-    assert {item.direction.value for item in decisions} == {"LONG", "SHORT"}
+    actionable = [item for item in decisions if item.actionable]
+    assert len(actionable) == 2
+    assert len({item.direction for item in actionable}) == 2
     assert all(
         item.status is ExecutionStatus.NO_TRADE_CONFLICTING_DIRECTIONS
         for item in report.execution_results
@@ -304,6 +470,7 @@ def test_same_direction_candidates_delegate_latest_base_bar_selection():
             source_kwargs["inputs"],
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
+        allow_custom_pipeline_builder=True,
     )
 
     report = instance.run(
@@ -353,6 +520,7 @@ def test_canonical_tick_to_replay_subject_to_pipeline_and_decision_record():
             "test-approved-quantity",
             {"source": "integration"},
         ),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -389,6 +557,7 @@ def test_reconstructed_equal_subject_id_is_accepted_end_to_end():
             source_kwargs["inputs"],
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -430,6 +599,7 @@ def test_end_to_end_fill_uses_later_actual_ask_not_planned_entry_and_exits_on_bi
             source_kwargs["inputs"],
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -466,6 +636,7 @@ def test_decision_tick_and_same_timestamp_later_source_order_tick_cannot_fill():
             source_kwargs["inputs"],
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -493,6 +664,7 @@ def test_missing_quantity_remains_non_actionable_and_never_creates_intent():
             source_kwargs["inputs"],
         ),
         quantity_provider=None,
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -543,6 +715,7 @@ def test_multitimeframe_availability_groups_drain_subjects_before_submit():
         replay_engine=replay(limits={"1min": 16, "3min": 8}),
         execution_engine=execution,
         pipeline_builder=build,
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -596,6 +769,7 @@ def test_active_position_is_processed_before_same_availability_candidate_submiss
             source_kwargs["inputs"],
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [
@@ -619,6 +793,7 @@ def test_future_ticks_cannot_alter_earlier_point_in_time_evidence():
             pipeline_builder=lambda inputs: (
                 observed.append(inputs) or incomplete_builder(inputs)
             ),
+            allow_custom_pipeline_builder=True,
         )
         ticks = [
             tick("2026-01-01T10:00:05Z", 0),
@@ -664,6 +839,7 @@ def test_execution_handoff_preserves_decision_and_provenance_chain():
             "governed-quantity",
             {"decision": "approved"},
         ),
+        allow_custom_pipeline_builder=True,
     )
     report = instance.run(
         [

@@ -14,6 +14,7 @@ from src.sniper_setup import PrecisionState
 from src.tick_execution import DecisionRecord, ExecutionDirection, ExecutionEngine
 from src.replay_subject import ReplaySubject
 from tests.test_core_v1_pipeline import evaluate, pipeline_fixture
+from tests.test_core_v1_retracement import FixedEntryResolver
 
 
 def valid_pipeline():
@@ -27,22 +28,17 @@ def developing_pipeline():
 
 
 def invalid_pipeline():
-    fixture, kwargs = pipeline_fixture()
-    invalidation, target = kwargs["invalidation"], kwargs["target"]
-    wrong_level = replace(
-        target.liquidity_level,
-        price=101.0,
+    _, kwargs = pipeline_fixture()
+    invalid_entry = replace(
+        kwargs["entry_resolver"].result,
+        planned_entry_price=108.0,
     )
-    wrong_target = replace(target, liquidity_level=wrong_level)
-    # Preserve the original timing and source lineage while violating long target geometry.
-    kwargs["inputs"] = replace(
-        kwargs["inputs"],
-        context_observations=kwargs["inputs"].context_observations,
+    result = evaluate(
+        kwargs,
+        entry_resolver=FixedEntryResolver(invalid_entry),
     )
-    kwargs["target"] = wrong_target
-    kwargs["opposing_liquidity_levels"] = (wrong_level,)
-    result = evaluate(kwargs)
     assert result.state is PrecisionState.INVALID
+    assert "LONG opposing-liquidity target must be above planned entry" in result.reason
     assert result.hypothesis is None
     return result
 
