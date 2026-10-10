@@ -22,6 +22,7 @@ from src.core_v1_liquidity import (
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
+from src.core_v1_tick_execution import CoreV1TickExecution
 from src.evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from src.market_structure import (
     LiquidityLevel as CanonicalLiquidityLevel,
@@ -32,7 +33,10 @@ from src.market_structure import (
     swings_to_liquidity,
 )
 from src.replay_subject import ReplaySubject
+from src.replay_engine import IncrementalHistoricalReplay, ReplayConfig
 from src.tick_aggregation import TickAggregator
+from src.tick_execution import ExecutionConfig, ExecutionEngine, QuoteEvent
+from src.timeframe_context import TimeframeContext
 from src.dukascopy_ticks import discover_dukascopy_tick_files, iter_dukascopy_ticks
 
 
@@ -293,12 +297,26 @@ def reaction(
         source_observations=sources,
         provenance={"resolver": "explicit test classifier"},
     )
+    confirmation_observation = next(
+        observation
+        for observation in inputs.base_observations
+        if confirmation_source in observation.timing.source_observations
+    )
+    prices = {
+        str(key).lower(): value
+        for key, value in confirmation_observation.value.items()
+    }
+    price_key = (
+        "low"
+        if breach_value.level.side is LiquiditySide.BSL
+        else "high"
+    )
     return CoreV1LiquidityReaction(
         subject=inputs.subject,
         breach=breach_value,
         kind=kind,
         timing=timing,
-        price=104.0,
+        price=float(prices[price_key]),
     )
 
 
@@ -569,6 +587,67 @@ def test_breach_is_a_distinct_observation_from_level():
     assert assessment.breach is breach_value
     assert assessment.breach.timing.event_timestamp != assessment.level.timing.event_timestamp
     assert assessment.reaction is None
+
+
+def test_breach_at_level_availability_is_rejected():
+    inputs = make_inputs()
+    candidate = level(inputs)
+    equal_timestamp = candidate.timing.availability_timestamp
+    equal_source = source(
+        "breach-at-level-availability",
+        equal_timestamp.isoformat(),
+        (equal_timestamp + pd.Timedelta(seconds=1)).isoformat(),
+    )
+    timing = EvidenceTiming.from_inputs(
+        event_timestamp=equal_timestamp,
+        source_observations=(
+            *candidate.timing.source_observations,
+            equal_source,
+        ),
+        base_bar_scoped=True,
+    )
+
+    with pytest.raises(ValueError, match="strictly after level availability"):
+        CoreV1LiquidityBreach(
+            subject=inputs.subject,
+            level=candidate,
+            price=candidate.price + 1.0,
+            timing=timing,
+        )
+
+
+def test_rejection_requires_an_observed_price():
+    inputs = make_inputs()
+    candidate = level(inputs)
+    breach_value = breach(inputs, candidate)
+    reaction_value = reaction(inputs, breach_value, ReactionKind.REJECTION)
+
+    with pytest.raises(ValueError, match="requires an observed reaction price"):
+        CoreV1LiquidityReaction(
+            subject=inputs.subject,
+            breach=breach_value,
+            kind=ReactionKind.REJECTION,
+            timing=reaction_value.timing,
+            price=None,
+        )
+
+
+def test_rejection_price_must_match_the_visible_confirmation_bar():
+    inputs = make_inputs()
+    candidate = level(inputs)
+    breach_value = breach(inputs, candidate)
+    fabricated_reaction = replace(
+        reaction(inputs, breach_value, ReactionKind.REJECTION),
+        price=93.0,
+    )
+
+    with pytest.raises(ValueError, match="match the observed reaction bar price"):
+        evaluate_core_v1_liquidity(
+            inputs,
+            levels=(candidate,),
+            breach_resolver=FixedBreachResolver(breach_value),
+            reaction_resolver=FixedReactionResolver(fabricated_reaction),
+        )
 
 
 def test_breach_event_and_availability_are_distinct():
@@ -1170,6 +1249,23 @@ def test_visible_swing_detector_preserves_distinct_pivot_confirmation_and_availa
     assert candidate.origin_source_id == candidate.timing.source_observations[-1].source_id
 
 
+def test_equal_highs_and_lows_do_not_form_strict_swings():
+    start = pd.Timestamp("2026-01-01T10:00:00")
+    rows = tuple(
+        (
+            (start + pd.Timedelta(minutes=index)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            100.0,
+            105.0,
+            95.0,
+            100.0,
+        )
+        for index in range(7)
+    )
+    inputs = priced_inputs(rows)
+
+    assert detect_core_v1_liquidity_levels(inputs) == ()
+
+
 def test_confirmation_and_availability_equal_to_subject_cutoff_are_visible():
     all_inputs = make_inputs()
     support = tuple(
@@ -1273,6 +1369,75 @@ def test_delayed_gap_bar_availability_is_the_first_later_finalizing_tick():
     assert emitted[0]["available_at"] == delayed_tick
     assert emitted[0]["available_at"] != emitted[0]["interval_end"]
 
+    rows = tuple(
+        (
+            f"2026-01-01T10:{minute:02d}:00Z",
+            100.0,
+            high,
+            low,
+            close,
+        )
+        for minute, high, low, close in (
+            (0, 101.0, 99.0, 100.0),
+            (5, 102.0, 98.0, 101.0),
+            (10, 105.0, 97.0, 102.0),
+            (15, 103.0, 98.0, 100.0),
+            (20, 101.0, 99.0, 100.0),
+        )
+    )
+    ordinary_inputs = priced_inputs(rows)
+    last_observation = ordinary_inputs.base_observations[-1]
+    last_source = last_observation.timing.source_observations[0]
+    delayed_source = replace(
+        last_source,
+        availability_timestamp=emitted[0]["available_at"],
+    )
+    delayed_timing = EvidenceTiming.from_inputs(
+        event_timestamp=last_source.event_timestamp,
+        source_observations=(delayed_source,),
+        base_bar_scoped=True,
+    )
+    delayed_observation = replace(last_observation, timing=delayed_timing)
+    subject = ReplaySubject(
+        availability_timestamp=delayed_tick,
+        base_bar_timestamp=last_source.event_timestamp,
+    )
+    delayed_inputs = SubjectVisibleInputs(
+        subject=subject,
+        availability_timestamp=delayed_tick,
+        base_observations=(
+            *ordinary_inputs.base_observations[:-1],
+            delayed_observation,
+        ),
+        context_observations=(),
+    )
+    candidate = next(
+        item
+        for item in detect_core_v1_liquidity_levels(delayed_inputs)
+        if item.side is LiquiditySide.BSL
+    )
+
+    assert candidate.origin.availability_timestamp == emitted[0]["available_at"]
+    assert candidate.timing.availability_timestamp == emitted[0]["available_at"]
+
+
+def test_detector_rejects_future_observation_when_input_validation_is_bypassed():
+    inputs = make_inputs()
+    future_source = source(
+        "future-base-observation",
+        "2026-01-01T10:07:00Z",
+        "2026-01-01T10:07:01Z",
+    )
+    future_observation = visible_observation(future_source)
+    object.__setattr__(
+        inputs,
+        "base_observations",
+        (*inputs.base_observations, future_observation),
+    )
+
+    with pytest.raises(ValueError, match="exceeds the ReplaySubject cutoff"):
+        detect_core_v1_liquidity_levels(inputs)
+
 
 def test_detector_is_invariant_to_post_cutoff_development_bars(require_canonical_dataset):
     raw_root = require_canonical_dataset("dukascopy")
@@ -1366,3 +1531,175 @@ def test_detector_is_invariant_to_post_cutoff_development_bars(require_canonical
             )
 
         assert signature(with_future) == signature(without_future)
+
+
+def test_production_visible_inputs_are_truncation_invariant_on_development_ticks(
+    require_canonical_dataset,
+):
+    raw_root = require_canonical_dataset("dukascopy")
+    january_2022 = tuple(
+        path
+        for path in discover_dukascopy_tick_files(raw_root / "2022")
+        if "2022-01-01-2022-02-01" in path.name
+    )
+    assert january_2022, "Expected a January 2022 development tick file."
+
+    aggregator = TickAggregator("1min")
+    bars = []
+    tick_events_by_interval = {}
+    source_order = 0
+    for batch in iter_dukascopy_ticks(january_2022, chunk_size=65_536):
+        for tick in batch.itertuples(index=False):
+            timestamp = pd.Timestamp(tick.timestamp).tz_convert("UTC")
+            tick_events_by_interval.setdefault(timestamp.floor("1min"), []).append(
+                QuoteEvent(
+                    timestamp=timestamp,
+                    bid=float(tick.bid),
+                    ask=float(tick.ask),
+                    source_order=source_order,
+                    provenance={"development_slice": "2022-01"},
+                )
+            )
+            source_order += 1
+            bars.extend(aggregator.add_tick(timestamp, tick.bid, tick.ask))
+            if len(bars) >= 64:
+                break
+        if len(bars) >= 64:
+            break
+    assert len(bars) >= 32, "Development slice did not yield enough complete bars."
+
+    frame = pd.DataFrame(
+        {
+            "Open": [bar["bid_open"] for bar in bars],
+            "High": [bar["bid_high"] for bar in bars],
+            "Low": [bar["bid_low"] for bar in bars],
+            "Close": [bar["bid_close"] for bar in bars],
+            "available_at": [bar["available_at"] for bar in bars],
+        },
+        index=[bar["interval_start"] for bar in bars],
+    )
+    frame.index = pd.DatetimeIndex(frame.index, name="timestamp")
+    timeframe = "1min"
+    replay = IncrementalHistoricalReplay(
+        config=ReplayConfig(timeframe=timeframe, source="DUKASCOPY_2022"),
+        history_limits={timeframe: 128},
+        max_pending_groups=8,
+        max_pending_bars=128,
+    )
+    execution = ExecutionEngine(
+        execution_run_id="liquidity-truncation-test",
+        initial_equity=10_000.0,
+        config=ExecutionConfig(
+            contract_size=1.0,
+            minimum_quantity=0.1,
+            quantity_step=0.1,
+            account_currency_conversion=1.0,
+            commission_per_unit_per_side=0.0,
+            slippage_per_unit_per_side=0.0,
+        ),
+    )
+    integration = CoreV1TickExecution(
+        aggregators={timeframe: TickAggregator(timeframe)},
+        replay=replay,
+        execution=execution,
+        pipeline_builder=lambda visible: None,
+    )
+    for interval_start, events in tick_events_by_interval.items():
+        integration._ticks_by_interval[timeframe][interval_start].extend(events)
+
+    full_as_of = pd.Timestamp(frame["available_at"].max()).tz_convert("UTC")
+    full_base_cutoff = pd.Timestamp(frame.index.max()).tz_convert("UTC")
+    full_subject = ReplaySubject(full_as_of, full_base_cutoff)
+    full_inputs = integration._visible_inputs(
+        full_subject,
+        frame,
+        TimeframeContext(frames={timeframe: frame}, replay_subject=full_subject),
+    )
+    candidates = detect_core_v1_liquidity_levels(full_inputs)
+    assert candidates, "Development slice must include a confirmed swing."
+    confirming_candidate = min(
+        candidates,
+        key=lambda item: item.origin.availability_timestamp,
+    )
+    confirming_bar = confirming_candidate.origin.confirmation_timestamp
+    confirming_row = frame.loc[confirming_bar]
+    confirming_availability = pd.Timestamp(
+        confirming_row["available_at"]
+    ).tz_convert("UTC")
+    special_cutoffs = (
+        confirming_availability - pd.Timedelta(nanoseconds=1),
+        confirming_availability,
+        confirming_availability + pd.Timedelta(nanoseconds=1),
+    )
+    rng = random.Random(20261010)
+    available_cutoffs = sorted(
+        {
+            pd.Timestamp(value).tz_convert("UTC")
+            for value in frame["available_at"]
+            if pd.Timestamp(value).tz_convert("UTC") > confirming_availability
+        }
+    )
+    cutoffs = tuple(
+        sorted(
+            set(special_cutoffs)
+            | set(rng.sample(available_cutoffs, min(16, len(available_cutoffs))))
+        )
+    )
+    assert len(cutoffs) >= 16
+
+    def visible_inputs(candidates_frame, as_of):
+        visible_rows = candidates_frame.loc[
+            (candidates_frame.index <= as_of)
+            & (candidates_frame["available_at"] <= as_of)
+        ]
+        if visible_rows.empty:
+            return None
+        base_cutoff = pd.Timestamp(visible_rows.index.max()).tz_convert("UTC")
+        subject = ReplaySubject(as_of, base_cutoff)
+        return integration._visible_inputs(
+            subject,
+            visible_rows,
+            TimeframeContext(
+                frames={timeframe: visible_rows},
+                replay_subject=subject,
+            ),
+        )
+
+    def signature(inputs):
+        return tuple(
+            (
+                item.side,
+                item.price,
+                item.origin.timestamp,
+                item.origin.confirmation_timestamp,
+                item.origin.availability_timestamp,
+                item.origin_source_id,
+                item.timing.source_observations,
+            )
+            for item in detect_core_v1_liquidity_levels(inputs)
+        )
+
+    assert confirming_candidate.origin.confirmation_timestamp == confirming_bar
+    assert confirming_candidate.origin.availability_timestamp >= confirming_availability
+    for as_of in cutoffs:
+        with_post_cutoff_data = visible_inputs(frame, as_of)
+        if with_post_cutoff_data is None:
+            assert visible_inputs(frame.loc[frame.index <= as_of], as_of) is None
+            continue
+        raw_without_post_cutoff = frame.loc[
+            frame.index <= with_post_cutoff_data.subject.base_bar_timestamp
+        ]
+        without_post_cutoff_data = visible_inputs(raw_without_post_cutoff, as_of)
+        if with_post_cutoff_data is None or without_post_cutoff_data is None:
+            assert with_post_cutoff_data is without_post_cutoff_data
+            continue
+        assert tuple(
+            item.timing.source_observations[0].source_id
+            for item in with_post_cutoff_data.base_observations
+        ) == tuple(
+            item.timing.source_observations[0].source_id
+            for item in without_post_cutoff_data.base_observations
+        )
+        assert signature(with_post_cutoff_data) == signature(
+            without_post_cutoff_data
+        )

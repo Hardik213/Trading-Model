@@ -3,6 +3,7 @@
 **Protocol:** v1  
 **Status:** FROZEN  
 **Frozen:** 2026-10-10 (Asia/Kolkata; UTC+05:30)  
+**Contract amendment:** v1.1 (2026-10-10); these clarifications do not alter periods, metric definitions, or holdout authorization.
 **Scope:** Research-period boundaries, holdout governance, result definitions, uncertainty reporting, and experiment records. This protocol does not authorize strategy implementation or evaluation runs.
 
 This protocol is frozen before the next strategy-detector implementation or strategy experiment. A code or rule change informed by revealed holdout results starts a new research cycle; the same 2025 observations then cease to be an untouched validation set for that revised strategy.
@@ -124,7 +125,14 @@ At least **100 completed out-of-sample trades** is a preliminary operational flo
 
 Record every attempted strategy experiment, including failed runs, zero-trade runs, and abandoned variants. Use `holdout_outcomes_accessed` values `NO`, `YES`, or `UNKNOWN`; never infer or backfill missing historical records. Keep each experiment's result location immutable and link it from the row. Log changes to protocol/metrics before they are used to inspect results. Freeze the holdout independently of which development variant looks best.
 
-Historical variant history is **INCOMPLETE / NOT RECONSTRUCTED**. No imaginary variants are backfilled. The CSV begins with its stable header and no experiment rows; no strategy experiment or holdout evaluation was run as part of this Step 2 documentation and validation task. Documentation tests and the repository verifier are protocol checks, not strategy experiments.
+Historical variant history is **INCOMPLETE / NOT RECONSTRUCTED**. No imaginary variants are backfilled. The CSV retains its stable experiment schema and currently contains only explicitly labeled characterization/contract-change records, not strategy-experiment results. No strategy experiment or holdout evaluation was run as part of the Step 2 documentation and validation task. Documentation tests and repository verification are protocol checks, not strategy experiments.
+
+### Contract amendment v1.1 — liquidity evidence
+
+- A rejection reaction must carry a finite price matching the side-specific observed extreme of its visible base bar at the reaction confirmation timestamp (low for BSL, high for SSL). An absent, inferred, or mismatched price is insufficient evidence. A custom reaction resolver's output is checked against that visible observation before acceptance.
+- A liquidity breach is valid only when `breach_event_timestamp > level_availability_timestamp`. Equality is not a breach; the boundary is strict.
+- These are evidence-validity requirements, not strategy variants or performance findings. They do not authorize a replay evaluation or use of the holdout.
+- The variant-log rows `CONTRACT-20261010-REJECTION-PRICE` and `CONTRACT-20261010-BREACH-AFTER-AVAILABILITY` record these contract changes. They do not represent experiments; dataset/configuration fields are not applicable.
 
 ## 6. Unverified assumptions and authorization gate
 

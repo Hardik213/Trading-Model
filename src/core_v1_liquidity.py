@@ -257,6 +257,22 @@ def detect_core_v1_liquidity_levels(
     bars: list[dict[str, float]] = []
     sources: list[EvidenceSourceObservation] = []
     for observation in inputs.base_observations:
+        if (
+            observation.timing.event_timestamp
+            > inputs.subject.base_bar_timestamp
+            or observation.timing.availability_timestamp
+            > inputs.subject.availability_timestamp
+        ):
+            raise ValueError(
+                "Visible base observation exceeds the ReplaySubject cutoff."
+            )
+        if observation.timing.confirmation_timestamp is not None and (
+            observation.timing.confirmation_timestamp
+            > inputs.subject.base_bar_timestamp
+        ):
+            raise ValueError(
+                "Visible base observation confirmation exceeds the base-bar cutoff."
+            )
         if not isinstance(observation.value, Mapping):
             return ()
         values = {str(key).lower(): value for key, value in observation.value.items()}
@@ -267,6 +283,19 @@ def detect_core_v1_liquidity_levels(
         source = observation.timing.source_observations[0]
         if not source.is_base_timeframe or not source.provenance:
             return ()
+        if (
+            source.event_timestamp > inputs.subject.base_bar_timestamp
+            or source.availability_timestamp
+            > inputs.subject.availability_timestamp
+            or (
+                source.base_bar_timestamp is not None
+                and source.base_bar_timestamp
+                > inputs.subject.base_bar_timestamp
+            )
+        ):
+            raise ValueError(
+                "Visible base source exceeds the ReplaySubject cutoff."
+            )
         try:
             bar = {
                 name: float(values[name])
@@ -434,7 +463,7 @@ def evaluate_core_v1_liquidity(
                 reaction = reaction_resolver.classify(inputs, breach)
             if reaction is not None:
                 _validate_reaction(
-                    inputs.subject,
+                    inputs,
                     breach,
                     reaction,
                     visible_sources,
@@ -852,7 +881,7 @@ def _validate_breach(
 
 
 def _validate_reaction(
-    subject: ReplaySubject,
+    inputs: SubjectVisibleInputs,
     breach: CoreV1LiquidityBreach,
     reaction: CoreV1LiquidityReaction,
     visible_sources: tuple[EvidenceSourceObservation, ...],
@@ -861,9 +890,12 @@ def _validate_reaction(
         raise TypeError(
             "Reaction resolver must return CoreV1LiquidityReaction or None."
         )
-    if not same_subject_id(reaction.subject, subject) or reaction.breach is not breach:
+    if (
+        not same_subject_id(reaction.subject, inputs.subject)
+        or reaction.breach is not breach
+    ):
         raise ValueError("Reaction resolver returned a reaction for another breach.")
-    reaction.timing.validate_for_subject(subject)
+    reaction.timing.validate_for_subject(inputs.subject)
     _validate_lineage(reaction.timing, visible_sources, "reaction")
     if any(
         source not in reaction.timing.source_observations
@@ -875,6 +907,32 @@ def _validate_reaction(
         breach.timing.source_observations,
         "reaction",
     )
+    if reaction.kind is ReactionKind.REJECTION:
+        confirmation = reaction.timing.confirmation_timestamp
+        observed_price_key = (
+            "low" if breach.level.side is LiquiditySide.BSL else "high"
+        )
+        observed_price = None
+        for observation in inputs.base_observations:
+            if observation.timing.event_timestamp != confirmation:
+                continue
+            if not isinstance(observation.value, Mapping):
+                break
+            values = {
+                str(key).lower(): value
+                for key, value in observation.value.items()
+            }
+            if observed_price_key not in values:
+                break
+            try:
+                observed_price = float(values[observed_price_key])
+            except (TypeError, ValueError, OverflowError):
+                break
+            break
+        if observed_price is None or reaction.price != observed_price:
+            raise ValueError(
+                "Rejection price must match the observed reaction bar price."
+            )
 
 
 def _validate_confirmation_provenance(
