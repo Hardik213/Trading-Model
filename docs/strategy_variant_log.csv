@@ -1,0 +1,1 @@
+variant_id,date_created_utc,code_commit,configuration_sha256,development_dataset_version,rule_parameter_changes,hypothesis,metrics_examined,result_location,decision,decision_rationale,holdout_outcomes_accessed,parent_variant_id

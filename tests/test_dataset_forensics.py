@@ -11,6 +11,7 @@ from src.dataset_forensics import (
     generate_dataset_reports,
     validate_dataset_timeframe,
 )
+from src.data_paths import data_root
 
 
 @pytest.mark.parametrize(
@@ -20,24 +21,32 @@ from src.dataset_forensics import (
         ("data/raw/external_secondary/octa_mt4/XAU_15m_data.csv", "octa_mt4"),
     ],
 )
-def test_dataset_discovery_finds_expected_sources(root, expected):
-    files = discover_dataset_files(root)
+@pytest.mark.dataset
+def test_dataset_discovery_finds_expected_sources(
+    root, expected, require_canonical_dataset
+):
+    dataset = require_canonical_dataset(expected)
+    relative = Path(root).parts[2:]
+    assert dataset == data_root().joinpath(*relative)
+    files = discover_dataset_files(dataset)
     assert files
     assert any(str(path).endswith(".csv") for path in files)
     assert expected in str(files[0]) or expected in str(files[-1])
 
 
-def test_timezone_and_source_separation_are_explicit():
-    duk = analyze_dataset("data/raw/dukascopy")
-    octa = analyze_dataset("data/raw/external_secondary/octa_mt4/XAU_15m_data.csv")
+@pytest.mark.dataset
+def test_timezone_and_source_separation_are_explicit(require_canonical_dataset):
+    duk = analyze_dataset(require_canonical_dataset("dukascopy"))
+    octa = analyze_dataset(require_canonical_dataset("octa_mt4"))
 
     assert duk["source"] == "Dukascopy free-data export"
     assert duk["source_timezone"] == "UTC"
     assert duk["internal_timezone"] == "UTC"
     assert duk["research_role"] == "primary_historical_dukascopy"
-    assert duk["duplicate_rows_after_first"] == 20117
-    assert duk["duplicate_rows_in_duplicate_groups"] == 23322
-    assert duk["duplicate_timestamp_values"] == 3205
+    assert duk["rows"] == 3_836_242
+    assert duk["duplicate_rows_after_first"] == 0
+    assert duk["duplicate_rows_in_duplicate_groups"] == 0
+    assert duk["duplicate_timestamp_values"] == 0
 
     assert octa["source"] == "Octa MT4 History Center"
     assert octa["source_timezone"] == "UTC+3"
@@ -50,14 +59,15 @@ def test_timezone_and_source_separation_are_explicit():
     assert duk["source"] != octa["source"]
 
 
-def test_duplicate_and_gap_detection_preserves_raw_data():
-    duk = analyze_dataset("data/raw/dukascopy")
+@pytest.mark.dataset
+def test_duplicate_and_gap_detection_preserves_raw_data(require_canonical_dataset):
+    duk = analyze_dataset(require_canonical_dataset("dukascopy"))
     assert duk["rows"] > 0
-    assert duk["duplicate_timestamps"] >= 0
-    assert duk["non_monotonic_rows"] >= 0
+    assert duk["duplicate_timestamps"] == 0
+    assert duk["non_monotonic_rows"] == 0
     assert duk["gap_distribution"]
 
-    octa = analyze_dataset("data/raw/external_secondary/octa_mt4/XAU_15m_data.csv")
+    octa = analyze_dataset(require_canonical_dataset("octa_mt4"))
     assert octa["timeframe"] == "15min"
     assert octa["gap_distribution"] == {}
     assert octa["duplicate_timestamps"] >= 0
@@ -77,8 +87,11 @@ def test_ohlc_validation_rejects_invalid_rows():
     assert result["invalid_ohlc_rows"] >= 1
 
 
-def test_15m_octa_dataset_cannot_be_treated_as_finer_granularity():
-    octa = analyze_dataset("data/raw/external_secondary/octa_mt4/XAU_15m_data.csv")
+@pytest.mark.dataset
+def test_15m_octa_dataset_cannot_be_treated_as_finer_granularity(
+    require_canonical_dataset,
+):
+    octa = analyze_dataset(require_canonical_dataset("octa_mt4"))
     for finer in ("1min", "3min", "5min"):
         with pytest.raises(ValueError):
             validate_dataset_timeframe(octa, finer)
@@ -86,7 +99,10 @@ def test_15m_octa_dataset_cannot_be_treated_as_finer_granularity():
     validate_dataset_timeframe(octa, "15min")
 
 
-def test_manifest_generation_is_deterministic(tmp_path):
+@pytest.mark.dataset
+def test_manifest_generation_is_deterministic(tmp_path, require_canonical_dataset):
+    require_canonical_dataset("dukascopy")
+    require_canonical_dataset("octa_mt4")
     generated = generate_dataset_reports(output_dir=tmp_path)
     assert set(generated) == {"dukascopy", "octa_mt4"}
 

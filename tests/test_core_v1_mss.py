@@ -201,6 +201,7 @@ def components(
                     confirmation=reaction_source.event_timestamp.isoformat(),
                     provenance={"resolver": "governed fixture"},
                 ),
+                price=106.0,
             )
         liquidity = CoreV1LiquidityAssessment(
             subject=inputs.subject,
@@ -580,7 +581,7 @@ def test_causal_ordering_violation_is_rejected(override, message):
         ValueError,
         match=(
             "Causal MSS ordering violation|cannot precede|availability cannot precede"
-            "|provenance must identify"
+            "|provenance must identify|Breach event must occur strictly after level availability"
         ),
     ):
         values = components(inputs, sources, **override)

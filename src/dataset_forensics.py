@@ -8,31 +8,28 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DATASET_PATHS = OrderedDict(
-    [
-        (
-            "dukascopy",
-            REPO_ROOT / "data" / "raw" / "dukascopy",
-        ),
-        (
-            "octa_mt4",
-            REPO_ROOT / "data" / "raw" / "external_secondary" / "octa_mt4" / "XAU_15m_data.csv",
-        ),
-    ]
-)
+from .data_paths import REPOSITORY_ROOT, canonical_dataset_paths
+from .dukascopy_ticks import discover_dukascopy_tick_files
+
+REPO_ROOT = REPOSITORY_ROOT
+
+
+def _dataset_paths() -> OrderedDict[str, Path]:
+    return OrderedDict(canonical_dataset_paths())
 
 
 def discover_dataset_files(path_like: str | Path | None = None) -> list[Path]:
     """Return all CSV files associated with a dataset root or a single CSV path."""
     if path_like is None:
         files: list[Path] = []
-        for candidate in DATASET_PATHS.values():
+        for candidate in _dataset_paths().values():
             files.extend(discover_dataset_files(candidate))
         return sorted(files, key=lambda p: str(p))
 
     candidate = Path(path_like)
     if candidate.is_dir():
+        if candidate.name.lower() == "dukascopy":
+            return discover_dukascopy_tick_files(candidate)
         return sorted(candidate.rglob("*.csv"), key=lambda p: str(p))
     if candidate.is_file() and candidate.suffix.lower() == ".csv":
         return [candidate]
@@ -106,6 +103,8 @@ def _coerce_legacy_timestamp(frame: pd.DataFrame) -> pd.Series:
 
 def _coerce_tick_timestamps(frame: pd.DataFrame) -> pd.Series:
     ts_series = frame["timestamp"]
+    if pd.api.types.is_datetime64_any_dtype(ts_series.dtype):
+        return pd.to_datetime(ts_series, errors="coerce", utc=True)
     numeric = pd.to_numeric(ts_series, errors="coerce")
     if numeric.empty:
         return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
@@ -389,12 +388,14 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def generate_dataset_reports(output_dir: str | Path = "data/reports") -> dict[str, dict[str, Any]]:
+def generate_dataset_reports(output_dir: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    if output_dir is None:
+        output_dir = REPO_ROOT / "data" / "reports"
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     manifests: dict[str, dict[str, Any]] = {}
-    for dataset_name, candidate in DATASET_PATHS.items():
+    for dataset_name, candidate in _dataset_paths().items():
         manifest = analyze_dataset(candidate)
         manifests[dataset_name] = manifest
         manifest_path = output_path / f"{dataset_name}_manifest.json"

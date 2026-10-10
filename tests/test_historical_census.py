@@ -417,8 +417,11 @@ def test_census_compatibility_regression_for_canonical_liquidity_event(tmp_path)
     assert payload["trade_plans"]
 
 
-def test_real_octa_dataset_metadata_stays_15min_without_full_replay():
-    path = Path("data/raw/external_secondary/octa_mt4/XAU_15m_data.csv")
+@pytest.mark.dataset
+def test_real_octa_dataset_metadata_stays_15min_without_full_replay(
+    require_canonical_dataset,
+):
+    path = require_canonical_dataset("octa_mt4")
     coverage = summarize_data_coverage(path, timeframe="15min", source="octa_mt4")
     assert coverage["source"] == "octa_mt4"
     assert coverage["timeframe"] == "15min"

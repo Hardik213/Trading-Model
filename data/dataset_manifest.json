@@ -1,0 +1,383 @@
+{
+  "aggregate_sha256": "e21e1e72ed2c442471e6787f83edb6a06c74b522a6c3be95aa4e2772b58addce",
+  "datasets": {
+    "dukascopy": {
+      "data_rows": 208940811,
+      "excluded_noncanonical_file": {
+        "path": "dukascopy/XAU-USD_100Tick_BID_2022-03-01_12_00-12_00_Etc_UTC.csv",
+        "reason": "BID OHLCV export; not canonical bid/ask tick data"
+      },
+      "expected_rows_hint": 208940811,
+      "file_count": 48,
+      "files": [
+        {
+          "data_rows": 3836242,
+          "path": "dukascopy/2022/xauusd-tick-2022-01-01-2022-02-01.csv",
+          "sha256": "ca7e3aa1dd7c27bf5fd05fe63eeb1c1f8c397020b856c7fcfaf73689e3c6587c",
+          "size_bytes": 122745293
+        },
+        {
+          "data_rows": 4742857,
+          "path": "dukascopy/2022/xauusd-tick-2022-02-01-2022-03-01.csv",
+          "sha256": "ddefadf20ed2b0e36ef66e0fb8d1b555c14943308a37cc2e9e00e67eeb5da6d9",
+          "size_bytes": 151671242
+        },
+        {
+          "data_rows": 6029825,
+          "path": "dukascopy/2022/xauusd-tick-2022-03-01-2022-04-01.csv",
+          "sha256": "dbee50b63fa756f9398a598ef3542a7268034e27561ffb6ad56b535579f72820",
+          "size_bytes": 192584655
+        },
+        {
+          "data_rows": 4573601,
+          "path": "dukascopy/2022/xauusd-tick-2022-04-01-2022-05-01.csv",
+          "sha256": "29685b273712f2239fcb6f11bae98d78607827dc343ad0f299af7b37aa8f96f8",
+          "size_bytes": 146249071
+        },
+        {
+          "data_rows": 4512077,
+          "path": "dukascopy/2022/xauusd-tick-2022-05-01-2022-06-01.csv",
+          "sha256": "fe5b88becc37c158a3cdb6cc039c0e9cac3604739e6881265435897dc00cf2cc",
+          "size_bytes": 144281717
+        },
+        {
+          "data_rows": 3936019,
+          "path": "dukascopy/2022/xauusd-tick-2022-06-01-2022-07-01.csv",
+          "sha256": "ef7d21f0453fa64995ff8fe61a1a0079f3cca43082727dc09c329c0a9c2a8e39",
+          "size_bytes": 125868928
+        },
+        {
+          "data_rows": 4097485,
+          "path": "dukascopy/2022/xauusd-tick-2022-07-01-2022-08-01.csv",
+          "sha256": "79807e03bdab0d3abe967c5bbb0de09865b7720407e3b2402087d30a50ffceac",
+          "size_bytes": 130955434
+        },
+        {
+          "data_rows": 3814712,
+          "path": "dukascopy/2022/xauusd-tick-2022-08-01-2022-09-01.csv",
+          "sha256": "47e4346e12bd98a331057e2db0b5b41bec390e1b2b96a9ff787d2f241dbc5cde",
+          "size_bytes": 121819595
+        },
+        {
+          "data_rows": 4655382,
+          "path": "dukascopy/2022/xauusd-tick-2022-09-01-2022-10-01.csv",
+          "sha256": "fea74c192b6e66a953059cacc52e9a2c8983c3baca63826f3a3538c669eb4243",
+          "size_bytes": 148776194
+        },
+        {
+          "data_rows": 3995914,
+          "path": "dukascopy/2022/xauusd-tick-2022-10-01-2022-11-01.csv",
+          "sha256": "5a6ceb6ece84e56895e3c9dbd1957f2afcc1d2aa88fcdd170c7cc68d306f7b44",
+          "size_bytes": 127782852
+        },
+        {
+          "data_rows": 3136512,
+          "path": "dukascopy/2022/xauusd-tick-2022-11-01-2022-12-01.csv",
+          "sha256": "ef36ed00c6f75088dd00a89a98cc0e247cae003069c7cf283df030e450871c4e",
+          "size_bytes": 100347766
+        },
+        {
+          "data_rows": 2960570,
+          "path": "dukascopy/2022/xauusd-tick-2022-12-01-2023-01-01.csv",
+          "sha256": "cf5d3442404440c1b55d05884c39913a4ad9ecea7093dc327e43b1dc3a2785ed",
+          "size_bytes": 94731129
+        },
+        {
+          "data_rows": 3172374,
+          "path": "dukascopy/2023/xauusd-tick-2023-01-01-2023-02-01.csv",
+          "sha256": "8a41be87e9bdca30df12cd7cd71f0938921a87a03a240a9de7936e6a13f1b48d",
+          "size_bytes": 101511253
+        },
+        {
+          "data_rows": 2785649,
+          "path": "dukascopy/2023/xauusd-tick-2023-02-01-2023-03-01.csv",
+          "sha256": "6008fd8aa41bbee640b0feae07ef172f612e4185616e4a6e1c780dfed8e77f52",
+          "size_bytes": 89140141
+        },
+        {
+          "data_rows": 3765734,
+          "path": "dukascopy/2023/xauusd-tick-2023-03-01-2023-04-01.csv",
+          "sha256": "e50022f5ad2ac756cdb1fcbc03a64625e112f9497c17988ab95c041edc59445b",
+          "size_bytes": 120499951
+        },
+        {
+          "data_rows": 2657312,
+          "path": "dukascopy/2023/xauusd-tick-2023-04-01-2023-05-01.csv",
+          "sha256": "6733bf20f9bd7db4afa07c9438cd3444978a501791033a63e04322045fa178f2",
+          "size_bytes": 85028335
+        },
+        {
+          "data_rows": 3512178,
+          "path": "dukascopy/2023/xauusd-tick-2023-05-01-2023-06-01.csv",
+          "sha256": "9652d0096a70c6ce5a3ab1fc3e79e22d1d702120075e25572aab7632ed6ec8c7",
+          "size_bytes": 112370050
+        },
+        {
+          "data_rows": 2818868,
+          "path": "dukascopy/2023/xauusd-tick-2023-06-01-2023-07-01.csv",
+          "sha256": "d6c2f4f724362b411be240d7b0c027eae6fae604c0d1079a10431778a4609459",
+          "size_bytes": 90195363
+        },
+        {
+          "data_rows": 2596648,
+          "path": "dukascopy/2023/xauusd-tick-2023-07-01-2023-08-01.csv",
+          "sha256": "e121f80f69bf13ef69203618fb1441d03fe95b130617d37680280d9d69543d18",
+          "size_bytes": 83085761
+        },
+        {
+          "data_rows": 2258608,
+          "path": "dukascopy/2023/xauusd-tick-2023-08-01-2023-09-01.csv",
+          "sha256": "a7f37beb88998d93d706972d2e460b860977ac414f39a9cfe1492c874a66dc2f",
+          "size_bytes": 72265745
+        },
+        {
+          "data_rows": 1866264,
+          "path": "dukascopy/2023/xauusd-tick-2023-09-01-2023-10-01.csv",
+          "sha256": "069277b404ebda143746cf0725976b8bafc6ac1d7b31ca914c5f9781993e7f31",
+          "size_bytes": 59708025
+        },
+        {
+          "data_rows": 2770219,
+          "path": "dukascopy/2023/xauusd-tick-2023-10-01-2023-11-01.csv",
+          "sha256": "80b18dd877472135361bfe10c8272cb33bcc6b49d70c1f6a93dd3c8b66ee0b16",
+          "size_bytes": 88628717
+        },
+        {
+          "data_rows": 2454056,
+          "path": "dukascopy/2023/xauusd-tick-2023-11-01-2023-12-01.csv",
+          "sha256": "087c04dfeffe8da0a9cb54a557fcd1dfbfeab64c57c7e034060d9bb49b3410b5",
+          "size_bytes": 78517794
+        },
+        {
+          "data_rows": 2713818,
+          "path": "dukascopy/2023/xauusd-tick-2023-12-01-2024-01-01.csv",
+          "sha256": "031db92f407d21aeea175476931c58fd95a5d93c1bf2e76d41fe0f21a9445f7e",
+          "size_bytes": 86836935
+        },
+        {
+          "data_rows": 3023735,
+          "path": "dukascopy/2024/xauusd-tick-2024-01-01-2024-02-01.csv",
+          "sha256": "e11ececc7991892a95351c87e94dc8a9eb7c786bb93aeaf37574e0b1120b6a22",
+          "size_bytes": 96756117
+        },
+        {
+          "data_rows": 2120779,
+          "path": "dukascopy/2024/xauusd-tick-2024-02-01-2024-03-01.csv",
+          "sha256": "d08024555d1b8f82bc85f0f415ad446e9dfd87937ae0958ad0ab20143bf7cbd3",
+          "size_bytes": 67857741
+        },
+        {
+          "data_rows": 2695840,
+          "path": "dukascopy/2024/xauusd-tick-2024-03-01-2024-04-01.csv",
+          "sha256": "21d30c03052c2089e6f584cb89f60a3f1900fc97d8baf850de50c589ea0d3e40",
+          "size_bytes": 86259601
+        },
+        {
+          "data_rows": 5230475,
+          "path": "dukascopy/2024/xauusd-tick-2024-04-01-2024-05-01.csv",
+          "sha256": "75f90091280a7f39c4d614e4af2669089b0a55b70292c7445410f8deda4074e8",
+          "size_bytes": 167359275
+        },
+        {
+          "data_rows": 5054706,
+          "path": "dukascopy/2024/xauusd-tick-2024-05-01-2024-06-01.csv",
+          "sha256": "04ce6e8b2442f5a8a1a6120ccbf89d7cd3da1cca5670a682f2095e3d34729ef8",
+          "size_bytes": 161740961
+        },
+        {
+          "data_rows": 4639089,
+          "path": "dukascopy/2024/xauusd-tick-2024-06-01-2024-07-01.csv",
+          "sha256": "17a72d64d59a82cd60bad36d72a921d49b7316f94ad5dd2b58265c8b61d5565a",
+          "size_bytes": 148434961
+        },
+        {
+          "data_rows": 5634585,
+          "path": "dukascopy/2024/xauusd-tick-2024-07-01-2024-08-01.csv",
+          "sha256": "235f35e3f697e5c6bfa20bdf22c61f6b9463fa01ee788bf87bf155e365a55c20",
+          "size_bytes": 180287465
+        },
+        {
+          "data_rows": 5958944,
+          "path": "dukascopy/2024/xauusd-tick-2024-08-01-2024-09-01.csv",
+          "sha256": "5050496f05b1c78ef9a419d5a118d13e4d94e9cd0f719b261b2f4ebd4d87c7df",
+          "size_bytes": 190664146
+        },
+        {
+          "data_rows": 4975669,
+          "path": "dukascopy/2024/xauusd-tick-2024-09-01-2024-10-01.csv",
+          "sha256": "544601ab2a386f81a025a61e1cd802c7801538d8fb1103d770dfe71ab1c40aa6",
+          "size_bytes": 159206316
+        },
+        {
+          "data_rows": 5321493,
+          "path": "dukascopy/2024/xauusd-tick-2024-10-01-2024-11-01.csv",
+          "sha256": "e9ccd1957ffa881c2ccdd8a54bbb9ce5f59fa8ebf8268cf26767e67ec4a971da",
+          "size_bytes": 170262415
+        },
+        {
+          "data_rows": 5623117,
+          "path": "dukascopy/2024/xauusd-tick-2024-11-01-2024-12-01.csv",
+          "sha256": "69e7a5aed7bbe1509399ea00fc1d3941f5a0f77c7aa79de50f76e04f487bb8bf",
+          "size_bytes": 179901176
+        },
+        {
+          "data_rows": 4929747,
+          "path": "dukascopy/2024/xauusd-tick-2024-12-01-2025-01-01.csv",
+          "sha256": "1ff85a8989267969dd3ec8b58ef392ba39d51195c85e0fe1b575a5ea75399ef2",
+          "size_bytes": 157702014
+        },
+        {
+          "data_rows": 5615788,
+          "path": "dukascopy/2025/xauusd-tick-2025-01-01-2025-02-01.csv",
+          "sha256": "cedab70a50231524bdd75e65c11c117cce1efcab676ef88604c070aa6817e125",
+          "size_bytes": 179685069
+        },
+        {
+          "data_rows": 5592410,
+          "path": "dukascopy/2025/xauusd-tick-2025-02-01-2025-03-01.csv",
+          "sha256": "b1927d8f1a0d9b422209a4b2f214929a8bd99de644408acdd1358d5072f8d947",
+          "size_bytes": 178929907
+        },
+        {
+          "data_rows": 5316144,
+          "path": "dukascopy/2025/xauusd-tick-2025-03-01-2025-04-01.csv",
+          "sha256": "1f168dce563313d2fbfca4b4247630ca1e2fbc3f24b41eb35975f966a54cef96",
+          "size_bytes": 170092924
+        },
+        {
+          "data_rows": 6135373,
+          "path": "dukascopy/2025/xauusd-tick-2025-04-01-2025-05-01.csv",
+          "sha256": "4d3048fa8d2b23ad72ce5be1f4b1761965b3cfe685866195448f94c4976c5577",
+          "size_bytes": 196277466
+        },
+        {
+          "data_rows": 5325454,
+          "path": "dukascopy/2025/xauusd-tick-2025-05-01-2025-06-01.csv",
+          "sha256": "7e20e9427e03367774a827859a25f5bc2301b7064b0a74f6b5451767ba1ee25d",
+          "size_bytes": 170381683
+        },
+        {
+          "data_rows": 4471326,
+          "path": "dukascopy/2025/xauusd-tick-2025-06-01-2025-07-01.csv",
+          "sha256": "d0640c99047c90df872a494870991dd0c77269b3bc637ebcf07adf5b45e2ef8e",
+          "size_bytes": 143074348
+        },
+        {
+          "data_rows": 4164323,
+          "path": "dukascopy/2025/xauusd-tick-2025-07-01-2025-08-01.csv",
+          "sha256": "96a92d17302f5bf322a0485c87d060bc805bf4ac08a459da1c91393999ca1164",
+          "size_bytes": 133253060
+        },
+        {
+          "data_rows": 4325458,
+          "path": "dukascopy/2025/xauusd-tick-2025-08-01-2025-09-01.csv",
+          "sha256": "ba6099dfae16b2f3db606ddb09c9112cae65a9740d142632afca9e8072c9ea03",
+          "size_bytes": 138410038
+        },
+        {
+          "data_rows": 5784828,
+          "path": "dukascopy/2025/xauusd-tick-2025-09-01-2025-10-01.csv",
+          "sha256": "79fe9bb901e44e5f575a3fd16fb2abcc62e3ae68bc8dc87131fe6893683c57a1",
+          "size_bytes": 185097591
+        },
+        {
+          "data_rows": 9154022,
+          "path": "dukascopy/2025/xauusd-tick-2025-10-01-2025-11-01.csv",
+          "sha256": "1c2adf52683ac16906d927038c4e82d9053d69256ebdd1613ccb685348eaff23",
+          "size_bytes": 292904117
+        },
+        {
+          "data_rows": 6298328,
+          "path": "dukascopy/2025/xauusd-tick-2025-11-01-2025-12-01.csv",
+          "sha256": "8bbba9b795e695ccf618182a62b9dd9f324e005abb09c56392a697b7d93cb5a6",
+          "size_bytes": 201535687
+        },
+        {
+          "data_rows": 7886254,
+          "path": "dukascopy/2025/xauusd-tick-2025-12-01-2026-01-01.csv",
+          "sha256": "5bc7775c83097acd2b0b638b9f64965ac0aaa80125bad8b5f66be286ccb21910",
+          "size_bytes": 252348490
+        }
+      ],
+      "instrument": "XAUUSD",
+      "monthly_coverage": [
+        "2022-01",
+        "2022-02",
+        "2022-03",
+        "2022-04",
+        "2022-05",
+        "2022-06",
+        "2022-07",
+        "2022-08",
+        "2022-09",
+        "2022-10",
+        "2022-11",
+        "2022-12",
+        "2023-01",
+        "2023-02",
+        "2023-03",
+        "2023-04",
+        "2023-05",
+        "2023-06",
+        "2023-07",
+        "2023-08",
+        "2023-09",
+        "2023-10",
+        "2023-11",
+        "2023-12",
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-08",
+        "2024-09",
+        "2024-10",
+        "2024-11",
+        "2024-12",
+        "2025-01",
+        "2025-02",
+        "2025-03",
+        "2025-04",
+        "2025-05",
+        "2025-06",
+        "2025-07",
+        "2025-08",
+        "2025-09",
+        "2025-10",
+        "2025-11",
+        "2025-12"
+      ],
+      "relative_root": "dukascopy/",
+      "schema": [
+        "timestamp",
+        "askPrice",
+        "bidPrice"
+      ],
+      "timestamp_convention": "Unix epoch milliseconds, UTC"
+    },
+    "octa_mt4": {
+      "file": {
+        "data_rows": 494235,
+        "delimiter": ";",
+        "native_granularity": "15min",
+        "path": "external_secondary/octa_mt4/XAU_15m_data.csv",
+        "schema": [
+          "Date",
+          "Open",
+          "High",
+          "Low",
+          "Close",
+          "Volume"
+        ],
+        "sha256": "a48336b48c030bc407a5b53123fa46b328b74215bd7865f16890b3147a3d70b6",
+        "size_bytes": 25608537,
+        "source_timezone": "UTC+3"
+      },
+      "instrument": "XAUUSD"
+    }
+  },
+  "schema_version": 1
+}

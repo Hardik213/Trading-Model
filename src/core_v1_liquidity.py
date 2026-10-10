@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
+import pandas as pd
+
 from .core_v1_evidence import SubjectVisibleInputs
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
-from .market_structure import LiquiditySide
+from .market_structure import LiquidityLevel as CanonicalLiquidityLevel
+from .market_structure import (
+    LiquiditySide,
+    SwingType,
+    detect_confirmed_swings,
+    swings_to_liquidity,
+)
 from .replay_subject import ReplaySubject, same_subject_id
 
 
@@ -23,15 +31,26 @@ class SweepKind(str, Enum):
     UNRESOLVED = "UNRESOLVED"
 
 
+class LiquidityEventDirection(str, Enum):
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
+
+
 @dataclass(frozen=True)
 class CoreV1LiquidityLevel:
-    """A supplied BSL/SSL level with subject timing and source lineage."""
+    """Detector output for a BSL/SSL level, with subject timing and lineage.
+
+    Instances are not trusted merely because they have this type. The liquidity
+    resolver recomputes their swing from the current subject's visible bars.
+    """
 
     subject: ReplaySubject
     level_id: str
     side: LiquiditySide
     price: float
     timing: EvidenceTiming
+    origin: CanonicalLiquidityLevel | None = None
+    origin_source_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.subject, ReplaySubject):
@@ -45,6 +64,12 @@ class CoreV1LiquidityLevel:
         if not isinstance(self.timing, EvidenceTiming):
             raise TypeError("Liquidity levels require EvidenceTiming provenance.")
         self.timing.validate_for_subject(self.subject)
+        if (self.origin is None) != (self.origin_source_id is None):
+            raise ValueError(
+                "Liquidity level origin and origin_source_id must be supplied together."
+            )
+        if self.origin is not None:
+            _validate_level_origin_contract(self)
 
 
 @dataclass(frozen=True)
@@ -64,10 +89,20 @@ class CoreV1LiquidityBreach:
         if not self.timing.base_bar_scoped:
             raise ValueError("Liquidity breach timing must be base-bar scoped.")
         self.timing.validate_for_subject(self.subject)
-        if self.timing.event_timestamp < self.level.timing.availability_timestamp:
-            raise ValueError("Breach event cannot precede level availability.")
-        if self.price is not None and not isfinite(float(self.price)):
-            raise ValueError("Breach price must be finite.")
+        if self.timing.event_timestamp <= self.level.timing.availability_timestamp:
+            raise ValueError("Breach event must occur strictly after level availability.")
+        if self.price is None or not isfinite(float(self.price)):
+            raise ValueError("Breach price must be finite and observed.")
+        if (
+            self.level.side is LiquiditySide.BSL
+            and float(self.price) <= self.level.price
+        ):
+            raise ValueError("A BSL breach price must be strictly above its level.")
+        if (
+            self.level.side is LiquiditySide.SSL
+            and float(self.price) >= self.level.price
+        ):
+            raise ValueError("An SSL breach price must be strictly below its level.")
 
 
 @dataclass(frozen=True)
@@ -93,6 +128,11 @@ class CoreV1LiquidityReaction:
         if self.timing.confirmation_timestamp is None:
             raise ValueError("A classified reaction requires a confirmation timestamp.")
         if (
+            self.timing.confirmation_timestamp
+            <= self.breach.timing.event_timestamp
+        ):
+            raise ValueError("Reaction must be observed strictly after the breach.")
+        if (
             self.timing.availability_timestamp
             < self.breach.timing.availability_timestamp
         ):
@@ -104,11 +144,25 @@ class CoreV1LiquidityReaction:
         )
         if self.price is not None and not isfinite(float(self.price)):
             raise ValueError("Reaction price must be finite.")
+        if self.kind is ReactionKind.REJECTION:
+            if self.price is None:
+                raise ValueError("A rejection requires an observed reaction price.")
+            side = self.breach.level.side
+            if (
+                side is LiquiditySide.BSL
+                and float(self.price) > self.breach.level.price
+            ):
+                raise ValueError("A BSL rejection must return through its level.")
+            if (
+                side is LiquiditySide.SSL
+                and float(self.price) < self.breach.level.price
+            ):
+                raise ValueError("An SSL rejection must return through its level.")
 
 
 @dataclass(frozen=True)
 class CoreV1LiquidityAssessment:
-    """Liquidity-stage state only; it contains no direction or trade signal."""
+    """Liquidity-stage state; event direction is distinct from trade direction."""
 
     subject: ReplaySubject
     level: CoreV1LiquidityLevel
@@ -117,6 +171,16 @@ class CoreV1LiquidityAssessment:
     sweep: SweepKind = SweepKind.UNRESOLVED
     sweep_timing: EvidenceTiming | None = None
     sweep_provenance: Mapping[str, object] | None = None
+
+    @property
+    def event_direction(self) -> LiquidityEventDirection | None:
+        if self.sweep is not SweepKind.SWEEP:
+            return None
+        return (
+            LiquidityEventDirection.BEARISH
+            if self.level.side is LiquiditySide.BSL
+            else LiquidityEventDirection.BULLISH
+        )
 
     def __post_init__(self) -> None:
         if not same_subject_id(self.subject, self.level.subject):
@@ -141,6 +205,8 @@ class CoreV1LiquidityAssessment:
         if self.sweep is not SweepKind.UNRESOLVED:
             if self.reaction is None or self.sweep_timing is None:
                 raise ValueError("Resolved sweep status requires reaction and timing.")
+            if self.sweep is SweepKind.SWEEP and self.level.origin is None:
+                raise ValueError("A confirmed sweep requires a canonical liquidity origin.")
             if (
                 self.sweep is SweepKind.SWEEP
                 and self.reaction.kind is not ReactionKind.REJECTION
@@ -164,6 +230,7 @@ class CoreV1LiquidityAssessment:
                 self.sweep_timing,
                 self.reaction.timing.source_observations,
                 "sweep",
+                allow_inherited=True,
             )
         elif self.sweep_timing is not None:
             raise ValueError("Unresolved sweep status cannot have confirmation timing.")
@@ -172,12 +239,106 @@ class CoreV1LiquidityAssessment:
 
 
 class LiquidityLevelResolver(Protocol):
-    """Optional governed level selector. No canonical selector currently exists."""
+    """Optional selector whose proposed levels are independently recomputed."""
 
     def resolve(
         self,
         inputs: SubjectVisibleInputs,
     ) -> tuple[CoreV1LiquidityLevel, ...]: ...
+
+
+def detect_core_v1_liquidity_levels(
+    inputs: SubjectVisibleInputs,
+) -> tuple[CoreV1LiquidityLevel, ...]:
+    """Derive confirmed swing liquidity only from this subject's visible base bars."""
+    if not isinstance(inputs, SubjectVisibleInputs):
+        raise TypeError("inputs must be SubjectVisibleInputs.")
+
+    bars: list[dict[str, float]] = []
+    sources: list[EvidenceSourceObservation] = []
+    for observation in inputs.base_observations:
+        if not isinstance(observation.value, Mapping):
+            return ()
+        values = {str(key).lower(): value for key, value in observation.value.items()}
+        if not {"open", "high", "low", "close"}.issubset(values):
+            return ()
+        if len(observation.timing.source_observations) != 1:
+            return ()
+        source = observation.timing.source_observations[0]
+        if not source.is_base_timeframe or not source.provenance:
+            return ()
+        try:
+            bar = {
+                name: float(values[name])
+                for name in ("open", "high", "low", "close")
+            }
+        except (TypeError, ValueError, OverflowError):
+            return ()
+        if any(not isfinite(value) for value in bar.values()):
+            return ()
+        if (
+            bar["high"] < max(bar["open"], bar["close"], bar["low"])
+            or bar["low"] > min(bar["open"], bar["close"], bar["high"])
+        ):
+            return ()
+        bars.append(bar)
+        sources.append(source)
+
+    timestamps = [source.event_timestamp for source in sources]
+    if len(timestamps) < 5 or any(
+        right <= left for left, right in zip(timestamps, timestamps[1:])
+    ):
+        return ()
+
+    frame = pd.DataFrame(
+        bars,
+        index=pd.DatetimeIndex(timestamps, name="timestamp"),
+    )
+    frame.columns = [column.title() for column in frame.columns]
+    output: list[CoreV1LiquidityLevel] = []
+    for swing in detect_confirmed_swings(frame):
+        if swing.confirmation_timestamp > inputs.subject.base_bar_timestamp:
+            continue
+        expected_side = (
+            LiquiditySide.BSL
+            if swing.kind is SwingType.HIGH
+            else LiquiditySide.SSL
+        )
+        support_sources = tuple(
+            sources[swing.source_index - 2 : swing.source_index + 3]
+        )
+        if len(support_sources) != 5:
+            continue
+        availability = max(
+            source.availability_timestamp for source in support_sources
+        )
+        if availability > inputs.subject.availability_timestamp:
+            continue
+
+        (origin,) = swings_to_liquidity((swing,))
+        origin = replace(origin, availability_timestamp=availability)
+        timing = EvidenceTiming.from_inputs(
+            event_timestamp=swing.timestamp,
+            confirmation_timestamp=swing.confirmation_timestamp,
+            source_observations=support_sources,
+            provenance={"resolver": "core-v1-visible-swing-detector"},
+            base_bar_scoped=True,
+        )
+        output.append(
+            CoreV1LiquidityLevel(
+                subject=inputs.subject,
+                level_id=(
+                    f"swing:{swing.kind.value}:{support_sources[0].source_id}:"
+                    f"{support_sources[-1].source_id}"
+                ),
+                side=expected_side,
+                price=swing.price,
+                timing=timing,
+                origin=origin,
+                origin_source_id=support_sources[-1].source_id,
+            )
+        )
+    return tuple(output)
 
 
 class LiquidityBreachResolver(Protocol):
@@ -236,6 +397,13 @@ def evaluate_core_v1_liquidity(
         selected = tuple(levels)
 
     assessments: list[CoreV1LiquidityAssessment] = []
+    if (
+        breach_resolver is None
+        and reaction_resolver is None
+        and sweep_resolver is None
+    ):
+        return _resolve_visible_liquidity(inputs, selected)
+
     seen_ids: set[str] = set()
     for level in selected:
         if not isinstance(level, CoreV1LiquidityLevel):
@@ -246,6 +414,11 @@ def evaluate_core_v1_liquidity(
             raise ValueError(f"Duplicate liquidity level_id: {level.level_id}")
         seen_ids.add(level.level_id)
         _validate_lineage(level.timing, visible_sources, "level")
+        if not _validate_level_origin_visibility(level, inputs):
+            assessments.append(
+                CoreV1LiquidityAssessment(subject=inputs.subject, level=level)
+            )
+            continue
 
         breach = None
         reaction = None
@@ -312,6 +485,7 @@ def evaluate_core_v1_liquidity(
                                 sweep_timing,
                                 reaction.timing.source_observations,
                                 "sweep",
+                                allow_inherited=True,
                             )
                         else:
                             sweep_timing = None
@@ -339,6 +513,304 @@ def _visible_sources(
         for observation in inputs.base_observations + inputs.context_observations
         for source in observation.timing.source_observations
     )
+
+
+def _resolve_visible_liquidity(
+    inputs: SubjectVisibleInputs,
+    levels: tuple[CoreV1LiquidityLevel, ...],
+) -> tuple[CoreV1LiquidityAssessment, ...]:
+    visible_sources = _visible_sources(inputs)
+    seen_ids: set[str] = set()
+    eligible: list[CoreV1LiquidityLevel] = []
+    unresolved: list[CoreV1LiquidityAssessment] = []
+    for level in levels:
+        if not isinstance(level, CoreV1LiquidityLevel):
+            raise TypeError("levels must contain CoreV1LiquidityLevel values.")
+        if not same_subject_id(level.subject, inputs.subject):
+            raise ValueError("Liquidity level belongs to a different ReplaySubject.")
+        if level.level_id in seen_ids:
+            raise ValueError(f"Duplicate liquidity level_id: {level.level_id}")
+        seen_ids.add(level.level_id)
+        _validate_lineage(level.timing, visible_sources, "level")
+        if _validate_level_origin_visibility(level, inputs):
+            eligible.append(level)
+        else:
+            unresolved.append(
+                CoreV1LiquidityAssessment(subject=inputs.subject, level=level)
+            )
+
+    observations = _visible_price_observations(inputs)
+    if not observations or not eligible:
+        return tuple(unresolved) + tuple(
+            CoreV1LiquidityAssessment(subject=inputs.subject, level=level)
+            for level in eligible
+        )
+
+    candidates: list[
+        tuple[CoreV1LiquidityLevel, CoreV1LiquidityBreach, float]
+    ] = []
+    for level in eligible:
+        baseline = next(
+            (
+                item
+                for item in reversed(observations)
+                if item[0].event_timestamp <= level.timing.availability_timestamp
+                and item[0].availability_timestamp
+                <= level.timing.availability_timestamp
+            ),
+            None,
+        )
+        if baseline is None:
+            unresolved.append(
+                CoreV1LiquidityAssessment(subject=inputs.subject, level=level)
+            )
+            continue
+
+        previous_close = baseline[1]["close"]
+        for source, prices in observations:
+            if source.event_timestamp <= level.timing.availability_timestamp:
+                continue
+            if source.availability_timestamp < level.timing.availability_timestamp:
+                continue
+            if level.side is LiquiditySide.BSL:
+                breached = previous_close <= level.price and prices["high"] > level.price
+                breach_price = prices["high"]
+            else:
+                breached = previous_close >= level.price and prices["low"] < level.price
+                breach_price = prices["low"]
+            if breached:
+                timing = EvidenceTiming.from_inputs(
+                    event_timestamp=source.event_timestamp,
+                    source_observations=(
+                        *level.timing.source_observations,
+                        source,
+                    ),
+                    provenance={
+                        "resolver": "point-in-time-core-v1-liquidity",
+                        "stage": "breach",
+                        "level_id": level.level_id,
+                    },
+                    base_bar_scoped=True,
+                )
+                breach = CoreV1LiquidityBreach(
+                    subject=inputs.subject,
+                    level=level,
+                    price=breach_price,
+                    timing=timing,
+                )
+                candidates.append(
+                    (level, breach, abs(level.price - previous_close))
+                )
+                break
+            previous_close = prices["close"]
+
+    if not candidates:
+        return tuple(unresolved) + tuple(
+            CoreV1LiquidityAssessment(subject=inputs.subject, level=level)
+            for level in eligible
+        )
+
+    earliest = min(
+        breach.timing.event_timestamp for _, breach, _ in candidates
+    )
+    same_time = [
+        item for item in candidates if item[1].timing.event_timestamp == earliest
+    ]
+    nearest_distance = min(distance for _, _, distance in same_time)
+    nearest = [
+        item for item in same_time if item[2] == nearest_distance
+    ]
+    if len({level.side for level, _, _ in same_time}) > 1 or len(nearest) != 1:
+        unresolved.extend(_ambiguous_assessments(inputs.subject, tuple(eligible)))
+        return tuple(unresolved)
+
+    selected, breach, _ = nearest[0]
+    reaction = _visible_reaction(inputs, selected, breach, observations)
+    if reaction is None:
+        unresolved.append(
+            CoreV1LiquidityAssessment(
+                subject=inputs.subject,
+                level=selected,
+                breach=breach,
+            )
+        )
+        return tuple(unresolved)
+    return tuple(unresolved) + (
+        CoreV1LiquidityAssessment(
+            subject=inputs.subject,
+            level=selected,
+            breach=breach,
+            reaction=reaction,
+            sweep=SweepKind.SWEEP,
+            sweep_timing=reaction.timing,
+            sweep_provenance={
+                "level_id": selected.level_id,
+                "level_side": selected.side.value,
+                "breach_price": breach.price,
+                "reaction_price": reaction.price,
+            },
+        ),
+    )
+
+
+def _visible_price_observations(
+    inputs: SubjectVisibleInputs,
+) -> tuple[tuple[EvidenceSourceObservation, dict[str, float]], ...]:
+    observations: list[tuple[EvidenceSourceObservation, dict[str, float]]] = []
+    for visible in inputs.base_observations:
+        if not isinstance(visible.value, Mapping):
+            return ()
+        values = {str(key).lower(): value for key, value in visible.value.items()}
+        if not {"high", "low", "close"}.issubset(values):
+            return ()
+        if len(visible.timing.source_observations) != 1:
+            return ()
+        source = visible.timing.source_observations[0]
+        try:
+            prices = {
+                name: float(values[name])
+                for name in ("high", "low", "close")
+            }
+        except (TypeError, ValueError, OverflowError):
+            return ()
+        if any(not isfinite(value) for value in prices.values()):
+            return ()
+        if prices["high"] < prices["low"]:
+            return ()
+        observations.append((source, prices))
+
+    timestamps = [source.event_timestamp for source, _ in observations]
+    if any(right <= left for left, right in zip(timestamps, timestamps[1:])):
+        return ()
+    return tuple(observations)
+
+
+def _visible_reaction(
+    inputs: SubjectVisibleInputs,
+    level: CoreV1LiquidityLevel,
+    breach: CoreV1LiquidityBreach,
+    observations: tuple[tuple[EvidenceSourceObservation, dict[str, float]], ...],
+) -> CoreV1LiquidityReaction | None:
+    for source, prices in observations:
+        if source.event_timestamp <= breach.timing.event_timestamp:
+            continue
+        if source.availability_timestamp < breach.timing.availability_timestamp:
+            continue
+        if level.side is LiquiditySide.BSL and prices["low"] <= level.price:
+            reaction_price = prices["low"]
+        elif level.side is LiquiditySide.SSL and prices["high"] >= level.price:
+            reaction_price = prices["high"]
+        else:
+            continue
+
+        timing = EvidenceTiming.from_inputs(
+            event_timestamp=breach.timing.event_timestamp,
+            confirmation_timestamp=source.event_timestamp,
+            source_observations=(
+                *breach.timing.source_observations,
+                source,
+            ),
+            provenance={
+                "resolver": "point-in-time-core-v1-liquidity",
+                "stage": "reaction",
+                "level_id": level.level_id,
+            },
+            base_bar_scoped=True,
+        )
+        return CoreV1LiquidityReaction(
+            subject=inputs.subject,
+            breach=breach,
+            kind=ReactionKind.REJECTION,
+            timing=timing,
+            price=reaction_price,
+        )
+    return None
+
+
+def _ambiguous_assessments(
+    subject: ReplaySubject,
+    levels: tuple[CoreV1LiquidityLevel, ...],
+) -> tuple[CoreV1LiquidityAssessment, ...]:
+    return tuple(
+        CoreV1LiquidityAssessment(
+            subject=subject,
+            level=level,
+            sweep_provenance={
+                "resolution": "UNRESOLVED",
+                "reason": "AMBIGUOUS_LEVEL_SELECTION",
+            },
+        )
+        for level in levels
+    )
+
+
+def _validate_level_origin_contract(level: CoreV1LiquidityLevel) -> None:
+    origin = level.origin
+    if not isinstance(origin, CanonicalLiquidityLevel):
+        raise TypeError("origin must be a canonical market_structure.LiquidityLevel.")
+    if type(level.origin_source_id) is not str or not level.origin_source_id:
+        raise ValueError("Canonical liquidity origin requires a source observation ID.")
+    if origin.side is not level.side:
+        raise ValueError("Liquidity level side does not match its canonical origin.")
+    if float(origin.price) != float(level.price):
+        raise ValueError("Liquidity level price does not match its canonical origin.")
+    if origin.source != "SWING":
+        raise ValueError(
+            "Canonical liquidity origin must use the existing SWING source."
+        )
+    if origin.confirmation_timestamp is None:
+        raise ValueError("Canonical liquidity origin requires confirmation time.")
+    if origin.availability_timestamp is None:
+        raise ValueError("Canonical liquidity origin requires availability time.")
+    source_matches = tuple(
+        source
+        for source in level.timing.source_observations
+        if source.source_id == level.origin_source_id
+    )
+    if len(source_matches) != 1:
+        raise ValueError(
+            "Liquidity origin source ID must identify exactly one level observation."
+        )
+    source = source_matches[0]
+    if (
+        source.event_timestamp != origin.confirmation_timestamp
+        or source.availability_timestamp != origin.availability_timestamp
+    ):
+        raise ValueError("Liquidity origin timing does not match its source observation.")
+    if (
+        level.timing.event_timestamp != origin.timestamp
+        or level.timing.confirmation_timestamp != origin.confirmation_timestamp
+        or level.timing.availability_timestamp != origin.availability_timestamp
+    ):
+        raise ValueError("Liquidity level timing does not match its canonical origin.")
+
+
+def _validate_level_origin_visibility(
+    level: CoreV1LiquidityLevel,
+    inputs: SubjectVisibleInputs,
+) -> bool:
+    if level.origin is None or level.origin_source_id is None:
+        return False
+
+    for expected in detect_core_v1_liquidity_levels(inputs):
+        if (
+            level.side is expected.side
+            and float(level.price) == float(expected.price)
+            and level.origin == expected.origin
+            and level.origin_source_id == expected.origin_source_id
+            and level.timing.event_timestamp == expected.timing.event_timestamp
+            and level.timing.confirmation_timestamp
+            == expected.timing.confirmation_timestamp
+            and level.timing.availability_timestamp
+            == expected.timing.availability_timestamp
+            and level.timing.base_bar_scoped
+            == expected.timing.base_bar_scoped
+            and level.timing.source_observations
+            == expected.timing.source_observations
+            and level.timing.provenance == expected.timing.provenance
+        ):
+            return True
+    return False
 
 
 def _validate_lineage(
@@ -409,12 +881,14 @@ def _validate_confirmation_provenance(
     timing: EvidenceTiming,
     inherited_sources: tuple[EvidenceSourceObservation, ...],
     label: str,
+    *,
+    allow_inherited: bool = False,
 ) -> None:
     confirmation = timing.confirmation_timestamp
     if confirmation is None:
         raise ValueError(f"{label.capitalize()} requires a confirmation timestamp.")
     if not any(
-        source not in inherited_sources
+        (allow_inherited or source not in inherited_sources)
         and source.event_timestamp == confirmation
         and source.availability_timestamp >= confirmation
         for source in timing.source_observations
@@ -429,6 +903,7 @@ __all__ = [
     "CoreV1LiquidityBreach",
     "CoreV1LiquidityLevel",
     "CoreV1LiquidityReaction",
+    "detect_core_v1_liquidity_levels",
     "LiquidityBreachResolver",
     "LiquidityLevelResolver",
     "LiquidityReactionResolver",

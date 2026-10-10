@@ -19,6 +19,28 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Reproducible canonical datasets
+
+Canonical raw data is resolved from `TRADING_DATA_ROOT`, which must point to
+the directory containing `dukascopy/` and
+`external_secondary/octa_mt4/XAU_15m_data.csv`. Without the variable, the
+default is this repository's `data/raw` directory. Relative overrides are
+resolved from the repository root. For example, in PowerShell:
+
+```powershell
+$env:TRADING_DATA_ROOT = 'C:\TWS\New - test\data\raw'
+python scripts\verify.py
+```
+
+The verifier streams the canonical files, checks the pinned manifest at
+`data/dataset_manifest.json`, runs the full test suite, and checks
+`git diff --check`. The manifest aggregate is SHA-256 over UTF-8 JSON with
+sorted keys, compact separators, and no `aggregate_sha256` field; its file
+entries are sorted by relative path and contain no machine-specific paths.
+Raw datasets remain ignored by Git. Dataset-dependent tests skip with an
+explicit diagnostic only when data is not configured; a missing file under a
+configured data root fails the test.
+
 ## Demo mode
 
 By default, the app generates synthetic OHLCV data so it can run without external subscriptions or local CSV files.

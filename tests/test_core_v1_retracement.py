@@ -205,6 +205,7 @@ def make_fixture() -> Fixture:
             ),
             confirmation="2026-01-01T10:01:30Z",
         ),
+        106.0,
     )
     liquidity = CoreV1LiquidityAssessment(
         current,
