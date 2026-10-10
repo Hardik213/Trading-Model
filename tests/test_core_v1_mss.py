@@ -22,6 +22,7 @@ from src.core_v1_liquidity import (
     CoreV1LiquidityReaction,
     ReactionKind,
     SweepKind,
+    detect_core_v1_liquidity_levels,
 )
 from src.core_v1_mss import (
     CoreV1MSSConfirmation,
@@ -93,8 +94,12 @@ def visible_inputs() -> tuple[
 ]:
     current = subject()
     sources = {
+        "level-left-2": source("level-left-2", "2026-01-01T09:59:00Z"),
         "point": source("point", "2026-01-01T10:00:00Z"),
+        "level-left-1": source("level-left-1", "2026-01-01T10:00:15Z"),
         "liquidity-level": source("liquidity-level", "2026-01-01T10:00:30Z"),
+        "level-right-1": source("level-right-1", "2026-01-01T10:00:40Z"),
+        "level-right-2": source("level-right-2", "2026-01-01T10:00:50Z"),
         "liquidity-breach": source("liquidity-breach", "2026-01-01T10:01:00Z"),
         "liquidity-confirmation": source(
             "liquidity-confirmation",
@@ -112,9 +117,29 @@ def visible_inputs() -> tuple[
             "2026-01-01T10:06:17Z",
         ),
     }
+    bars = (
+        (102.0, 104.0, 101.0, 103.0),
+        (103.0, 105.0, 100.0, 104.0),
+        (104.0, 105.5, 101.0, 105.0),
+        (104.0, 106.0, 101.0, 105.0),
+        (103.0, 105.0, 99.0, 104.0),
+        (102.0, 104.0, 98.0, 103.0),
+        (102.0, 107.0, 97.0, 106.0),
+        (103.0, 108.0, 96.0, 107.0),
+        (104.0, 109.0, 95.0, 108.0),
+        (105.0, 110.0, 94.0, 109.0),
+        (106.0, 111.0, 93.0, 110.0),
+        (107.0, 112.0, 92.0, 111.0),
+    )
     observations = tuple(
         SubjectVisibleObservation(
-            value={"source_id": item.source_id},
+            value={
+                "source_id": item.source_id,
+                "open": bar[0],
+                "high": bar[1],
+                "low": bar[2],
+                "close": bar[3],
+            },
             timing=timing(
                 item.event_timestamp.isoformat(),
                 (item,),
@@ -123,7 +148,7 @@ def visible_inputs() -> tuple[
             ),
             scope=ObservationScope.BASE,
         )
-        for item in sources.values()
+        for item, bar in zip(sources.values(), bars)
     )
     inputs = SubjectVisibleInputs(
         subject=current,
@@ -169,15 +194,10 @@ def components(
         level_source = sources["liquidity-level"]
         breach_source = sources["liquidity-breach"]
         reaction_source = sources["liquidity-confirmation"]
-        level = CoreV1LiquidityLevel(
-            subject=inputs.subject,
-            level_id="liquidity-1",
-            side=LiquiditySide.BSL,
-            price=106.0,
-            timing=timing(
-                level_source.event_timestamp.isoformat(),
-                (level_source,),
-            ),
+        (level,) = tuple(
+            candidate
+            for candidate in detect_core_v1_liquidity_levels(inputs)
+            if candidate.timing.event_timestamp == level_source.event_timestamp
         )
         liquidity_breach = CoreV1LiquidityBreach(
             subject=inputs.subject,
@@ -185,7 +205,7 @@ def components(
             price=107.0,
             timing=timing(
                 liquidity_time,
-                (level_source, breach_source),
+                (*level.timing.source_observations, breach_source),
                 base_scoped=True,
             ),
         )
@@ -197,7 +217,10 @@ def components(
                 kind=ReactionKind.REJECTION,
                 timing=timing(
                     liquidity_time,
-                    (level_source, breach_source, reaction_source),
+                    (
+                        *liquidity_breach.timing.source_observations,
+                        reaction_source,
+                    ),
                     confirmation=reaction_source.event_timestamp.isoformat(),
                     provenance={"resolver": "governed fixture"},
                 ),
@@ -309,6 +332,30 @@ def test_valid_mss_requires_all_governed_components():
     assert result.displacement is values["displacement"]
     assert result.structural_break is values["structural_break"]
     assert result.confirmation is values["confirmation"]
+
+
+def test_mss_rejects_liquidity_level_not_recomputed_from_visible_bars():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    accepted = values["liquidity_event"]
+    fabricated_level = CoreV1LiquidityLevel(
+        subject=inputs.subject,
+        level_id="fabricated-level",
+        side=LiquiditySide.BSL,
+        price=105.0,
+        timing=accepted.level.timing,
+    )
+    breach = replace(accepted.breach, level=fabricated_level)
+    reaction = replace(accepted.reaction, breach=breach, price=105.0)
+    values["liquidity_event"] = replace(
+        accepted,
+        level=fabricated_level,
+        breach=breach,
+        reaction=reaction,
+    )
+
+    with pytest.raises(ValueError, match="recomputed from visible base observations"):
+        evaluate(inputs, values)
 
 
 def test_mss_component_subject_validation_uses_subject_id():

@@ -14,6 +14,7 @@ from .core_v1_evidence import SubjectVisibleInputs
 from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     ReactionKind,
+    detect_core_v1_liquidity_levels,
 )
 from .displacement import Direction
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
@@ -384,9 +385,15 @@ def _validate_liquidity(
     value: CoreV1LiquidityAssessment,
     inputs: SubjectVisibleInputs,
 ) -> None:
+    if not isinstance(value, CoreV1LiquidityAssessment):
+        raise TypeError("Liquidity event must be a CoreV1LiquidityAssessment.")
     _validate_component_subject(value.subject, inputs.subject, "Liquidity event")
     if not _liquidity_is_resolved(value):
         raise ValueError("Liquidity event is unresolved.")
+    if value.level not in detect_core_v1_liquidity_levels(inputs):
+        raise ValueError(
+            "Liquidity level does not match a swing recomputed from visible base observations."
+        )
     assert value.breach is not None
     assert value.reaction is not None
     value.breach.timing.validate_for_subject(inputs.subject)

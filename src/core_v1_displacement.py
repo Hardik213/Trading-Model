@@ -9,7 +9,10 @@ from typing import Mapping, Protocol
 import pandas as pd
 
 from .core_v1_evidence import SubjectVisibleInputs
-from .core_v1_liquidity import CoreV1LiquidityAssessment
+from .core_v1_liquidity import (
+    CoreV1LiquidityAssessment,
+    detect_core_v1_liquidity_levels,
+)
 from .displacement import Direction
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from .replay_subject import ReplaySubject, same_subject_id
@@ -141,11 +144,16 @@ def evaluate_core_v1_displacement(
     if observation is not None and resolver is not None:
         raise ValueError("Supply a displacement observation or resolver, not both.")
     context = tuple(liquidity_context)
+    visible_levels = detect_core_v1_liquidity_levels(inputs) if context else ()
     for item in context:
         if not isinstance(item, CoreV1LiquidityAssessment):
             raise TypeError("liquidity_context must contain liquidity assessments.")
         if not same_subject_id(item.subject, inputs.subject):
             raise ValueError("Liquidity context belongs to another ReplaySubject.")
+        if item.level not in visible_levels:
+            raise ValueError(
+                "Liquidity context level does not match a swing recomputed from visible base observations."
+            )
 
     candidate = observation
     if candidate is None and resolver is not None:

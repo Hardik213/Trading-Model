@@ -18,6 +18,7 @@ from src.core_v1_evidence import (
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
+    detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
 from src.displacement import Direction
@@ -362,19 +363,37 @@ def test_unrestricted_historical_frame_is_rejected():
 
 
 def test_liquidity_context_is_optional_and_not_a_displacement_trigger():
-    inputs = make_inputs()
-    level_source = inputs.base_observations[0].timing.source_observations[0]
-    level_timing = EvidenceTiming.from_inputs(
-        event_timestamp=level_source.event_timestamp,
-        source_observations=(level_source,),
+    bars = (
+        (102.0, 103.0, 99.0, 101.0),
+        (103.0, 104.0, 98.0, 102.0),
+        (104.0, 106.0, 100.0, 105.0),
+        (103.0, 105.0, 97.0, 104.0),
+        (102.0, 104.0, 96.0, 103.0),
     )
-    liquidity_level = CoreV1LiquidityLevel(
-        subject=inputs.subject,
-        level_id="context-only",
-        side=LiquiditySide.BSL,
-        price=105.0,
-        timing=level_timing,
+    items = tuple(
+        source(
+            f"swing-bar-{index}",
+            f"2026-01-01T10:0{index}:00Z",
+            f"2026-01-01T10:0{index}:01Z",
+        )
+        for index in range(5)
     )
+    inputs = SubjectVisibleInputs(
+        subject=make_subject(),
+        availability_timestamp=make_subject().availability_timestamp,
+        base_observations=tuple(
+            visible_observation(
+                item,
+                value={
+                    **dict(zip(("open", "high", "low", "close"), bar)),
+                    "source_id": item.source_id,
+                },
+            )
+            for item, bar in zip(items, bars)
+        ),
+        context_observations=(),
+    )
+    (liquidity_level,) = detect_core_v1_liquidity_levels(inputs)
     (assessment,) = evaluate_core_v1_liquidity(inputs, levels=(liquidity_level,))
     resolver = FixedResolver(None)
     result = evaluate_core_v1_displacement(
@@ -384,3 +403,22 @@ def test_liquidity_context_is_optional_and_not_a_displacement_trigger():
     )
     assert resolver.received is inputs
     assert result.status is DisplacementStatus.UNRESOLVED
+
+
+def test_displacement_rejects_liquidity_context_without_recomputed_swing():
+    inputs = make_inputs()
+    level_source = inputs.base_observations[0].timing.source_observations[0]
+    fabricated = CoreV1LiquidityLevel(
+        subject=inputs.subject,
+        level_id="fabricated-context",
+        side=LiquiditySide.BSL,
+        price=105.0,
+        timing=EvidenceTiming.from_inputs(
+            event_timestamp=level_source.event_timestamp,
+            source_observations=(level_source,),
+        ),
+    )
+    (assessment,) = evaluate_core_v1_liquidity(inputs, levels=(fabricated,))
+
+    with pytest.raises(ValueError, match="recomputed from visible base observations"):
+        evaluate_core_v1_displacement(inputs, liquidity_context=(assessment,))

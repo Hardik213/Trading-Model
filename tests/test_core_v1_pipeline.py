@@ -27,7 +27,11 @@ from tests.test_core_v1_retracement import (
     ts,
 )
 from src.core_v1_displacement import DisplacementStatus
-from src.core_v1_liquidity import CoreV1LiquidityAssessment
+from src.core_v1_liquidity import (
+    CoreV1LiquidityAssessment,
+    CoreV1LiquidityLevel,
+    detect_core_v1_liquidity_levels,
+)
 
 
 def with_extra_visible(inputs, source_observations):
@@ -48,8 +52,19 @@ def with_extra_visible(inputs, source_observations):
             provenance={"pipeline_test": True},
             base_bar_scoped=source.is_base_timeframe,
         )
+        value = (
+            {
+                "open": 107.25,
+                "high": 107.5,
+                "low": 94.5,
+                "close": 107.0,
+                "source_id": source.source_id,
+            }
+            if source.is_base_timeframe
+            else {"source_id": source.source_id}
+        )
         observation = SubjectVisibleObservation(
-            value={"source_id": source.source_id},
+            value=value,
             timing=timing,
             scope=(
                 ObservationScope.BASE
@@ -61,14 +76,52 @@ def with_extra_visible(inputs, source_observations):
         known.append(source)
     return replace(
         inputs,
-        base_observations=tuple(base),
+        base_observations=tuple(
+            sorted(base, key=lambda item: item.timing.event_timestamp)
+        ),
         context_observations=tuple(context),
     )
+
+
+def target_for_visible_swing(inputs, target):
+    (level,) = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.side is target.liquidity_level.side
+    )
+    selection_sources = tuple(
+        source
+        for source in target.timing.source_observations
+        if source not in target.liquidity_level.timing.source_observations
+    )
+    timing = replace(
+        target.timing,
+        event_timestamp=level.timing.event_timestamp,
+        source_observations=(
+            *level.timing.source_observations,
+            *selection_sources,
+        ),
+    )
+    return replace(target, liquidity_level=level, timing=timing)
 
 
 def pipeline_fixture():
     fixture = make_fixture()
     invalidation, target = components(fixture, fixture.planned_entry)
+    invalidation_source = replace(
+        invalidation.timing.source_observations[0],
+        event_timestamp=ts("2026-01-01T10:01:15Z"),
+        availability_timestamp=ts("2026-01-01T10:01:15Z"),
+        base_bar_timestamp=ts("2026-01-01T10:01:15Z"),
+    )
+    invalidation_timing = replace(
+        invalidation.timing,
+        event_timestamp=invalidation_source.event_timestamp,
+        availability_timestamp=invalidation_source.availability_timestamp,
+        source_observations=(invalidation_source,),
+    )
+    invalidation = replace(invalidation, timing=invalidation_timing)
+    target = target_for_visible_swing(fixture.inputs, target)
     added_sources = (
         *invalidation.timing.source_observations,
         *target.timing.source_observations,
@@ -141,6 +194,48 @@ def test_pipeline_provenance_rejects_oversized_mapping_keys():
     result = evaluate(kwargs)
     with pytest.raises(TypeError, match="mapping keys"):
         replace(result, provenance={"k" * 4097: ()})
+
+
+def test_pipeline_rejects_liquidity_level_without_visible_swing_recomputation():
+    fixture, kwargs = pipeline_fixture()
+    accepted = fixture.liquidity
+    fabricated_level = CoreV1LiquidityLevel(
+        subject=fixture.subject,
+        level_id="fabricated-pipeline-level",
+        side=accepted.level.side,
+        price=105.0,
+        timing=accepted.level.timing,
+    )
+    fabricated = CoreV1LiquidityAssessment(
+        subject=fixture.subject,
+        level=fabricated_level,
+    )
+
+    with pytest.raises(ValueError, match="recomputed from visible base observations"):
+        evaluate(kwargs, liquidity=fabricated)
+
+
+def test_pipeline_rejects_opposing_candidate_without_visible_swing_recomputation():
+    _, kwargs = pipeline_fixture()
+    original_target = kwargs["target"]
+    fabricated_level = CoreV1LiquidityLevel(
+        subject=original_target.subject,
+        level_id="fabricated-target-level",
+        side=original_target.liquidity_level.side,
+        price=105.0,
+        timing=original_target.liquidity_level.timing,
+    )
+    fabricated_target = replace(
+        original_target,
+        liquidity_level=fabricated_level,
+    )
+
+    with pytest.raises(ValueError, match="recomputed from visible base observations"):
+        evaluate(
+            kwargs,
+            target=fabricated_target,
+            opposing_liquidity_levels=(fabricated_level,),
+        )
 
 
 @pytest.mark.parametrize(
@@ -342,18 +437,20 @@ def test_premium_context_alone_does_not_qualify_an_entry():
 
 def test_contradictory_target_geometry_returns_invalid_without_hypothesis():
     fixture, kwargs = pipeline_fixture()
-    invalidation, target = components(
-        fixture,
-        fixture.planned_entry,
-        target_price=101.0,
-    )
+    invalidation = kwargs["invalidation"]
+    target = kwargs["target"]
     inputs = with_extra_visible(
         kwargs["inputs"],
         (*invalidation.timing.source_observations, *target.timing.source_observations),
     )
+    planned_entry = replace(
+        kwargs["entry_resolver"].result,
+        planned_entry_price=107.0,
+    )
     result = evaluate(
         kwargs,
         inputs=inputs,
+        entry_resolver=FixedEntryResolver(planned_entry),
         invalidation=invalidation,
         target=target,
         opposing_liquidity_levels=(target.liquidity_level,),

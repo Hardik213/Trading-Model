@@ -20,7 +20,11 @@ from .core_v1_hypothesis import (
     StructuralInvalidationResolver,
     evaluate_core_v1_hypothesis,
 )
-from .core_v1_liquidity import CoreV1LiquidityAssessment, CoreV1LiquidityLevel
+from .core_v1_liquidity import (
+    CoreV1LiquidityAssessment,
+    CoreV1LiquidityLevel,
+    detect_core_v1_liquidity_levels,
+)
 from .core_v1_mss import CoreV1MSSResult, MSSStatus, evaluate_core_v1_mss
 from .core_v1_reactionary_zones import (
     CoreV1FVGObservation,
@@ -350,9 +354,32 @@ def evaluate_core_v1_pipeline(
     elif not same_subject_id(context.subject, subject):
         raise ValueError("Dealing-range context belongs to another ReplaySubject.")
     _validate_visible_component(inputs, context.provenance, "Dealing-range context")
+
+    visible_levels = detect_core_v1_liquidity_levels(inputs)
+    if liquidity is not None:
+        if not isinstance(liquidity, CoreV1LiquidityAssessment):
+            raise TypeError("liquidity must be a CoreV1LiquidityAssessment.")
+        _validate_recomputed_liquidity_level(
+            liquidity.level,
+            visible_levels,
+            "Liquidity",
+        )
+    if target is not None:
+        if not isinstance(target, CoreV1OpposingLiquidityTarget):
+            raise TypeError("target must be a CoreV1OpposingLiquidityTarget.")
+        _validate_recomputed_liquidity_level(
+            target.liquidity_level,
+            visible_levels,
+            "Target",
+        )
     if draw_on_liquidity is not None:
         if not isinstance(draw_on_liquidity, CoreV1LiquidityLevel):
             raise TypeError("draw_on_liquidity must be a governed liquidity level.")
+        _validate_recomputed_liquidity_level(
+            draw_on_liquidity,
+            visible_levels,
+            "Draw-on-liquidity",
+        )
         _validate_subject(draw_on_liquidity, subject, "Draw-on-liquidity")
         draw_on_liquidity.timing.validate_for_subject(subject)
         _validate_visible_component(
@@ -364,6 +391,11 @@ def evaluate_core_v1_pipeline(
     for level in opposing_liquidity_levels:
         if not isinstance(level, CoreV1LiquidityLevel):
             raise TypeError("opposing_liquidity_levels must contain governed liquidity levels.")
+        _validate_recomputed_liquidity_level(
+            level,
+            visible_levels,
+            "Opposing-liquidity candidate",
+        )
         _validate_subject(level, subject, "Opposing-liquidity candidate")
         level.timing.validate_for_subject(subject)
         _validate_visible_component(
@@ -524,6 +556,12 @@ def evaluate_core_v1_pipeline(
         target=target,
         target_resolver=target_resolver,
     )
+    if hypothesis_result.target is not None:
+        _validate_recomputed_liquidity_level(
+            hypothesis_result.target.liquidity_level,
+            visible_levels,
+            "Resolved target",
+        )
     if hypothesis_result.state is not PrecisionState.VALID:
         if hypothesis_result.invalidation is not None:
             _validate_visible_component(
@@ -902,6 +940,17 @@ def _validate_visible_component(
     )
     if any(source not in visible for source in sources):
         raise ValueError(f"{label} provenance references evidence outside visible inputs.")
+
+
+def _validate_recomputed_liquidity_level(
+    level: CoreV1LiquidityLevel,
+    visible_levels: tuple[CoreV1LiquidityLevel, ...],
+    label: str,
+) -> None:
+    if level not in visible_levels:
+        raise ValueError(
+            f"{label} level does not match a swing recomputed from visible base observations."
+        )
 
 
 def _liquidity_is_resolved(value: CoreV1LiquidityAssessment) -> bool:

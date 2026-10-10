@@ -23,6 +23,7 @@ from src.core_v1_liquidity import (
     CoreV1LiquidityReaction,
     ReactionKind,
     SweepKind,
+    detect_core_v1_liquidity_levels,
 )
 from src.core_v1_mss import (
     CoreV1MSSConfirmation,
@@ -115,6 +116,12 @@ def make_fixture() -> Fixture:
     sources = {
         "point": make_source("point", "2026-01-01T10:00:00Z"),
         "liquidity-level": make_source("liquidity-level", "2026-01-01T10:00:30Z"),
+        "liquidity-level-right-1": make_source(
+            "liquidity-level-right-1", "2026-01-01T10:00:40Z"
+        ),
+        "liquidity-level-right-2": make_source(
+            "liquidity-level-right-2", "2026-01-01T10:00:50Z"
+        ),
         "liquidity-breach": make_source("liquidity-breach", "2026-01-01T10:01:00Z"),
         "liquidity-confirmation": make_source(
             "liquidity-confirmation", "2026-01-01T10:01:30Z"
@@ -130,7 +137,7 @@ def make_fixture() -> Fixture:
             "2026-01-01T10:06:17Z",
         ),
         "fvg-first": make_source("fvg-first", "2026-01-01T09:55:00Z"),
-        "fvg-third": make_source("fvg-third", "2026-01-01T10:05:00Z"),
+        "fvg-third": make_source("fvg-third", "2026-01-01T10:04:59Z"),
         "interaction": make_source("interaction", "2026-01-01T10:06:10Z"),
         "entry-resolver": make_source(
             "entry-resolver",
@@ -139,9 +146,39 @@ def make_fixture() -> Fixture:
             base=False,
         ),
     }
+    ordered_base_sources = sorted(
+        (source for source in sources.values() if source.is_base_timeframe),
+        key=lambda source: source.event_timestamp,
+    )
+    support_bars = (
+        (101.0, 103.0, 99.0, 101.0),
+        (102.0, 104.0, 98.0, 102.0),
+        (104.0, 106.0, 100.0, 105.0),
+        (103.0, 105.0, 97.0, 104.0),
+        (102.0, 104.0, 96.0, 103.0),
+    )
+    ohlc_by_source = {
+        source.source_id: dict(
+            zip(("open", "high", "low", "close"), bar)
+        )
+        for source, bar in zip(ordered_base_sources, support_bars)
+    }
+    for index, source in enumerate(ordered_base_sources[len(support_bars):]):
+        high = 107.0 + index
+        low = 95.0 - index
+        ohlc_by_source[source.source_id] = {
+            "open": high - 2.0,
+            "high": high,
+            "low": low,
+            "close": high - 1.0,
+        }
     visible = tuple(
         SubjectVisibleObservation(
-            value={"source_id": source.source_id},
+            value=(
+                {**ohlc_by_source[source.source_id], "source_id": source.source_id}
+                if source.is_base_timeframe
+                else {"source_id": source.source_id}
+            ),
             timing=make_timing(
                 source.event_timestamp.isoformat(),
                 (source,),
@@ -160,7 +197,10 @@ def make_fixture() -> Fixture:
         subject=current,
         availability_timestamp=current.availability_timestamp,
         base_observations=tuple(
-            item for item in visible if item.scope is ObservationScope.BASE
+            sorted(
+                (item for item in visible if item.scope is ObservationScope.BASE),
+                key=lambda item: item.timing.event_timestamp,
+            )
         ),
         context_observations=tuple(
             item for item in visible if item.scope is ObservationScope.CONTEXT
@@ -176,12 +216,11 @@ def make_fixture() -> Fixture:
             (sources["point"],),
         ),
     )
-    level = CoreV1LiquidityLevel(
-        current,
-        "liquidity-1",
-        LiquiditySide.BSL,
-        106.0,
-        make_timing("2026-01-01T10:00:30Z", (sources["liquidity-level"],)),
+    (level,) = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.timing.event_timestamp
+        == sources["liquidity-level"].event_timestamp
     )
     breach = CoreV1LiquidityBreach(
         current,
@@ -189,7 +228,7 @@ def make_fixture() -> Fixture:
         107.0,
         make_timing(
             "2026-01-01T10:01:00Z",
-            (sources["liquidity-level"], sources["liquidity-breach"]),
+            (*level.timing.source_observations, sources["liquidity-breach"]),
         ),
     )
     reaction = CoreV1LiquidityReaction(
@@ -199,8 +238,7 @@ def make_fixture() -> Fixture:
         make_timing(
             "2026-01-01T10:01:00Z",
             (
-                sources["liquidity-level"],
-                sources["liquidity-breach"],
+                *breach.timing.source_observations,
                 sources["liquidity-confirmation"],
             ),
             confirmation="2026-01-01T10:01:30Z",
@@ -265,17 +303,17 @@ def make_fixture() -> Fixture:
     )
     fvg = FVG(
         FVGDirection.BULLISH,
-        ts("2026-01-01T10:05:00Z"),
-        ts("2026-01-01T10:05:00Z"),
+        ts("2026-01-01T10:04:59Z"),
+        ts("2026-01-01T10:04:59Z"),
         ts("2026-01-01T09:55:00Z"),
-        ts("2026-01-01T10:05:00Z"),
+        ts("2026-01-01T10:04:59Z"),
         101.0,
         103.0,
         102.0,
         2.0,
     )
     zone_timing = make_timing(
-        "2026-01-01T10:05:00Z",
+        "2026-01-01T10:04:59Z",
         (sources["fvg-first"], sources["fvg-third"]),
     )
     zone = CoreV1FVGObservation(current, fvg, zone_timing)
