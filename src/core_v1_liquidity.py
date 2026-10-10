@@ -912,23 +912,27 @@ def _validate_reaction(
         observed_price_key = (
             "low" if breach.level.side is LiquiditySide.BSL else "high"
         )
+        confirmation_observations = tuple(
+            observation
+            for observation in inputs.base_observations
+            if observation.timing.event_timestamp == confirmation
+        )
+        if len(confirmation_observations) != 1:
+            raise ValueError(
+                "Rejection confirmation must identify exactly one visible base observation."
+            )
         observed_price = None
-        for observation in inputs.base_observations:
-            if observation.timing.event_timestamp != confirmation:
-                continue
-            if not isinstance(observation.value, Mapping):
-                break
+        observation = confirmation_observations[0]
+        if isinstance(observation.value, Mapping):
             values = {
                 str(key).lower(): value
                 for key, value in observation.value.items()
             }
-            if observed_price_key not in values:
-                break
-            try:
-                observed_price = float(values[observed_price_key])
-            except (TypeError, ValueError, OverflowError):
-                break
-            break
+            if observed_price_key in values:
+                try:
+                    observed_price = float(values[observed_price_key])
+                except (TypeError, ValueError, OverflowError):
+                    pass
         if observed_price is None or reaction.price != observed_price:
             raise ValueError(
                 "Rejection price must match the observed reaction bar price."

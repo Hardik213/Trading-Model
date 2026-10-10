@@ -19,6 +19,8 @@ from src.core_v1_liquidity import (
     CoreV1LiquidityReaction,
     ReactionKind,
     SweepKind,
+    _validate_reaction,
+    _visible_sources,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
@@ -647,6 +649,50 @@ def test_rejection_price_must_match_the_visible_confirmation_bar():
             levels=(candidate,),
             breach_resolver=FixedBreachResolver(breach_value),
             reaction_resolver=FixedReactionResolver(fabricated_reaction),
+        )
+
+
+def test_rejection_confirmation_with_duplicate_base_timestamps_fails_closed():
+    inputs = make_inputs()
+    candidate = level(inputs)
+    breach_value = breach(inputs, candidate)
+    reaction_value = reaction(inputs, breach_value, ReactionKind.REJECTION)
+    confirmation_source = reaction_value.timing.source_observations[-1]
+    duplicate_source = replace(
+        confirmation_source,
+        source_id="duplicate-reaction-confirmation",
+        provenance={
+            **confirmation_source.provenance,
+            "source_id": "duplicate-reaction-confirmation",
+        },
+    )
+    confirmation_observation = next(
+        observation
+        for observation in inputs.base_observations
+        if confirmation_source in observation.timing.source_observations
+    )
+    duplicate_observation = replace(
+        confirmation_observation,
+        timing=EvidenceTiming.from_inputs(
+            event_timestamp=duplicate_source.event_timestamp,
+            source_observations=(duplicate_source,),
+            base_bar_scoped=True,
+        ),
+    )
+    duplicate_inputs = replace(
+        inputs,
+        base_observations=(*inputs.base_observations, duplicate_observation),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="exactly one visible base observation",
+    ):
+        _validate_reaction(
+            duplicate_inputs,
+            breach_value,
+            reaction_value,
+            _visible_sources(duplicate_inputs),
         )
 
 

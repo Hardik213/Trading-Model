@@ -23,7 +23,7 @@ Historical bars and decisions must follow the repository's actual replay semanti
 
 Data before a period's inclusive start may be used only as causal warm-up/context if required by the frozen strategy and replay. It cannot create a counted decision, entry, trade, or performance observation before the period. A trade is attributed to the evaluation period, UTC year, and session of its actual entry-fill timestamp. The holdout is not a development or debugging interval.
 
-**Historical holdout exposure:** **UNKNOWN.** Existing development records have not established whether 2025 outcomes were previously inspected. No claim is made that the holdout has never been seen. Do not inspect 2025 outcomes to resolve this uncertainty. If later records establish prior outcome access, document that fact and reassess whether the period can serve as an untouched holdout before authorizing evaluation.
+**Historical holdout exposure:** The owner confirms that only raw-data presence and integrity were checked on 2025 data; no strategy outcomes, performance metrics, or charts were inspected while designing or selecting rules. This is an owner attestation, not technical sealing or independent proof of all prior activity. Retain the access prohibition below. If contrary records emerge, document them and reassess whether 2025 can serve as an untouched holdout before authorizing evaluation.
 
 ## 2. Holdout access and freeze gate
 
@@ -144,4 +144,5 @@ If an unverified fact prevents computing any required metric or respecting causa
 
 - No strategy backtest, strategy experiment, swing/displacement/MSS implementation, or holdout outcome inspection was performed for this step.
 - Validation is limited to protocol/log schema checks, repository tests, raw-data integrity verification, and whitespace checks.
-- Holdout contamination status remains **UNKNOWN**; this step did not attempt to determine it by looking at 2025 outcomes.
+- Owner-confirmed prior exposure is limited to raw-data presence/integrity checks; no strategy outcomes, metrics, or charts were inspected.
+- Historical census/forensics tests were reviewed: the Dukascopy forensics tests calculate timestamp coverage, duplicate/gap and quote/OHLC validity metadata, not price ranges or returns; census fixtures use synthetic data dated in 2022, while the real-dataset census test checks Octa metadata only. No such test computed price ranges or returns on 2025 Dukascopy data.
