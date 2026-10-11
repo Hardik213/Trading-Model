@@ -49,8 +49,11 @@ class CoreV1SubjectExecution:
     visible_inputs: SubjectVisibleInputs
     pipeline_result: CoreV1PipelineResult
     bridge_result: CoreV1DecisionBridgeResult
+    pipeline_builder_identity: str
 
     def __post_init__(self) -> None:
+        if not self.pipeline_builder_identity:
+            raise ValueError("Pipeline builder identity must be non-empty.")
         if not same_subject_id(self.visible_inputs.subject, self.subject):
             raise ValueError("Visible inputs must preserve the exact ReplaySubject.")
         if not same_subject_id(self.pipeline_result.subject, self.subject):
@@ -80,6 +83,7 @@ class CoreV1TickExecution:
         execution: ExecutionEngine,
         pipeline_builder: PipelineBuilder | None = None,
         allow_custom_pipeline_builder: bool = False,
+        pipeline_builder_identity: str | None = None,
         evidence_enricher: EvidenceEnricher | None = None,
         quantity_provider: QuantityProvider | None = None,
         order_type: str = "MARKET",
@@ -89,19 +93,44 @@ class CoreV1TickExecution:
         if type(allow_custom_pipeline_builder) is not bool:
             raise TypeError("allow_custom_pipeline_builder must be a bool.")
         if pipeline_builder is None:
+            if pipeline_builder_identity is not None:
+                raise ValueError(
+                    "pipeline_builder_identity is only valid with a custom pipeline_builder."
+                )
             pipeline_builder = evaluate_core_v1_pipeline
+            pipeline_builder_identity = (
+                "src.core_v1_pipeline.evaluate_core_v1_pipeline"
+            )
         elif not callable(pipeline_builder):
             raise TypeError("pipeline_builder must be callable.")
         elif not allow_custom_pipeline_builder:
             raise ValueError(
                 "A custom pipeline_builder requires allow_custom_pipeline_builder=True."
             )
+        elif (
+            not isinstance(pipeline_builder_identity, str)
+            or not pipeline_builder_identity
+            or len(pipeline_builder_identity) > 128
+            or not pipeline_builder_identity.isascii()
+            or any(
+                not (character.isalnum() or character in "._:-")
+                for character in pipeline_builder_identity
+            )
+        ):
+            raise ValueError(
+                "A custom pipeline_builder requires a stable ASCII "
+                "pipeline_builder_identity (1-128 characters: letters, digits, "
+                "period, underscore, colon, or hyphen)."
+            )
+        if pipeline_builder_identity is None:
+            raise RuntimeError("Effective pipeline builder identity was not resolved.")
         if evidence_enricher is not None and not callable(evidence_enricher):
             raise TypeError("evidence_enricher must be callable or None.")
         if quantity_provider is not None and not callable(quantity_provider):
             raise TypeError("quantity_provider must be callable or None.")
         self.execution = execution
         self.pipeline_builder = pipeline_builder
+        self.pipeline_builder_identity = pipeline_builder_identity
         self.evidence_enricher = evidence_enricher
         self.quantity_provider = quantity_provider
         self.order_type = order_type
@@ -207,6 +236,7 @@ class CoreV1TickExecution:
                 visible_inputs=visible_inputs,
                 pipeline_result=pipeline_result,
                 bridge_result=bridge,
+                pipeline_builder_identity=self.pipeline_builder_identity,
             )
         )
         return bridge.decision_record

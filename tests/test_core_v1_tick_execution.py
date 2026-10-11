@@ -165,6 +165,7 @@ def integration(
     execution_engine=None,
     pipeline_builder=None,
     allow_custom_pipeline_builder=False,
+    pipeline_builder_identity=None,
     evidence_enricher=None,
     quantity_provider=None,
     order_type="MARKET",
@@ -175,6 +176,7 @@ def integration(
         execution=execution_engine or engine(),
         pipeline_builder=pipeline_builder,
         allow_custom_pipeline_builder=allow_custom_pipeline_builder,
+        pipeline_builder_identity=pipeline_builder_identity,
         evidence_enricher=evidence_enricher,
         quantity_provider=quantity_provider,
         order_type=order_type,
@@ -218,6 +220,10 @@ def test_pipeline_builder_defaults_to_canonical_evaluator():
     instance = integration()
 
     assert instance.pipeline_builder is evaluate_core_v1_pipeline
+    assert (
+        instance.pipeline_builder_identity
+        == "src.core_v1_pipeline.evaluate_core_v1_pipeline"
+    )
 
 
 def test_custom_pipeline_builder_requires_explicit_opt_in():
@@ -235,6 +241,7 @@ def test_explicitly_opted_in_pipeline_builder_is_invoked():
     instance = integration(
         pipeline_builder=builder,
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity="tests.test_core_v1_tick_execution.opted_in_builder",
     )
     instance.run(
         [
@@ -245,6 +252,14 @@ def test_explicitly_opted_in_pipeline_builder_is_invoked():
 
     assert len(observed) == 1
     assert isinstance(observed[0], SubjectVisibleInputs)
+    assert instance.pipeline_builder_identity == (
+        "tests.test_core_v1_tick_execution.opted_in_builder"
+    )
+    assert len(instance._subject_executions) == 1
+    assert (
+        instance._subject_executions[0].pipeline_builder_identity
+        == "tests.test_core_v1_tick_execution.opted_in_builder"
+    )
 
 
 def short_pipeline_from_visible_bars(inputs, source_kwargs, template, template_subject):
@@ -433,6 +448,9 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_conflicting_governed_directions"
+        ),
     )
     report = instance.run(
         [
@@ -471,6 +489,9 @@ def test_same_direction_candidates_delegate_latest_base_bar_selection():
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_same_direction_candidates"
+        ),
     )
 
     report = instance.run(
@@ -521,6 +542,9 @@ def test_canonical_tick_to_replay_subject_to_pipeline_and_decision_record():
             {"source": "integration"},
         ),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_canonical_tick_to_pipeline"
+        ),
     )
     report = instance.run(
         [
@@ -558,6 +582,9 @@ def test_reconstructed_equal_subject_id_is_accepted_end_to_end():
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_reconstructed_subject_id"
+        ),
     )
     report = instance.run(
         [
@@ -600,6 +627,9 @@ def test_end_to_end_fill_uses_later_actual_ask_not_planned_entry_and_exits_on_bi
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_end_to_end_fill_and_exit"
+        ),
     )
     report = instance.run(
         [
@@ -637,6 +667,9 @@ def test_decision_tick_and_same_timestamp_later_source_order_tick_cannot_fill():
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_same_timestamp_later_tick"
+        ),
     )
     report = instance.run(
         [
@@ -665,6 +698,9 @@ def test_missing_quantity_remains_non_actionable_and_never_creates_intent():
         ),
         quantity_provider=None,
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_missing_quantity"
+        ),
     )
     report = instance.run(
         [
@@ -716,6 +752,9 @@ def test_multitimeframe_availability_groups_drain_subjects_before_submit():
         execution_engine=execution,
         pipeline_builder=build,
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_multitimeframe_availability"
+        ),
     )
     report = instance.run(
         [
@@ -770,6 +809,9 @@ def test_active_position_is_processed_before_same_availability_candidate_submiss
         ),
         quantity_provider=lambda _: CoreV1QuantityInput(0.1, "explicit-q"),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_active_position_processing"
+        ),
     )
     report = instance.run(
         [
@@ -794,6 +836,9 @@ def test_future_ticks_cannot_alter_earlier_point_in_time_evidence():
                 observed.append(inputs) or incomplete_builder(inputs)
             ),
             allow_custom_pipeline_builder=True,
+            pipeline_builder_identity=(
+                "tests.test_core_v1_tick_execution.test_future_tick_truncation"
+            ),
         )
         ticks = [
             tick("2026-01-01T10:00:05Z", 0),
@@ -840,6 +885,9 @@ def test_execution_handoff_preserves_decision_and_provenance_chain():
             {"decision": "approved"},
         ),
         allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_execution_handoff"
+        ),
     )
     report = instance.run(
         [
