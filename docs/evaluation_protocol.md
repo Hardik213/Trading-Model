@@ -136,6 +136,20 @@ Historical variant history is **INCOMPLETE / NOT RECONSTRUCTED**. No imaginary v
 - These are evidence-validity requirements, not strategy variants or performance findings. They do not authorize a replay evaluation or use of the holdout.
 - The variant-log rows `CONTRACT-20261010-REJECTION-PRICE` and `CONTRACT-20261010-BREACH-AFTER-AVAILABILITY` record these contract changes. They do not represent experiments; dataset/configuration fields are not applicable.
 
+### Owner decisions for Step 3D
+
+- Rejection remains wick-based: the side-specific wick return is the selected rejection evidence. A close-back-inside is evidence only and is never a rejection gate.
+- The frozen nominal level-life table is M1: 1 day, M3: 1 week, M5: 1 month, M15: 3 months, H1: 6 months, H4: 12 months, and 1D: 12 months.
+- Lifetime semantics are confirmed, but implementation is deferred. A level lives from swing confirmation until the first of a price sweep or maximum age reached in trading time; weekends and closed hours do not age it.
+- It remains unresolved whether a level breached but never rejected is consumed at breach while a later rejection of that same breach remains eligible. No behavior is selected by this record.
+- `ACCEPTANCE` reactions are out of scope for v1 and fail closed at the MSS, displacement, and pipeline boundaries.
+- Cross-timeframe clustering is not implemented in Step 3D. There is no timeframe priority. Nearby levels may later be recorded as a stronger zone, but clustering must not gate detection. Any future tolerance must be volatility-based (a fraction of ATR), not fixed dollars.
+- The daily/H4 boundary convention remains a working assumption pending read-only verification: TradingView OANDA, a 17:00 `America/New_York` cut using the timezone database. Weekly open is Sunday at 17:00 `America/New_York`. Do not replace timezone rules with fixed UTC offsets.
+- Session classification for session-filtered experiments remains blocked pending DST-aware verification.
+- The half-open replay boundary `[start,end)` remains blocked pending runtime verification.
+- The ICT 2022 rejection model is first. Other variants, including the 2023 model, must be frozen separately. Permit one holdout evaluation per frozen model, and no more than one model evaluated on 2025 without a protocol change. No evaluation is authorized by this record.
+- The owner confirms that only raw-data presence and integrity were checked on 2025. No strategy outcomes, metrics or charts were inspected. Do not describe the holdout status as unknown. The holdout prohibition still applies.
+
 ## 6. Unverified assumptions and authorization gate
 
 The period bounds, UTC rules, metrics, session labels, bootstrap method, and procedural access policy are frozen here. The following implementation/run facts remain **UNVERIFIED** and must be confirmed from the frozen build/config before evaluation: actual starting equity and account currency; conversion source/rate; contract-size/point-value interpretation; realized-P&L accounting consistency with this protocol; explicit slippage and commission values; how execution output records open-at-period-end valuation; strategy-specific session filters; and replay warm-up behavior at period start.
