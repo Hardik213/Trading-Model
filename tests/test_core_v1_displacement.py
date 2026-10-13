@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import pandas as pd
 import pytest
 
+import src.core_v1_displacement as displacement_module
 from src.core_v1_displacement import (
     CoreV1DisplacementObservation,
     DisplacementStatus,
@@ -18,6 +19,8 @@ from src.core_v1_evidence import (
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
+    ReactionKind,
+    SweepKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
@@ -532,3 +535,28 @@ def test_displacement_rejects_forged_reaction_on_genuine_visible_swing():
 
     with pytest.raises(ValueError, match="full assessment recomputed"):
         evaluate_core_v1_displacement(inputs, liquidity_context=(forged,))
+
+
+def test_displacement_rejects_acceptance_reaction(monkeypatch):
+    inputs = visible_swing_assessment_inputs()
+    (level,) = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.side is LiquiditySide.BSL
+    )
+    (canonical,) = evaluate_core_v1_liquidity(inputs, levels=(level,))
+    acceptance = replace(
+        canonical,
+        reaction=replace(canonical.reaction, kind=ReactionKind.ACCEPTANCE),
+        sweep=SweepKind.UNRESOLVED,
+        sweep_timing=None,
+        sweep_provenance={},
+    )
+    monkeypatch.setattr(
+        displacement_module,
+        "evaluate_core_v1_liquidity",
+        lambda inputs, *, levels: (acceptance,),
+    )
+
+    with pytest.raises(ValueError, match="ACCEPTANCE reactions"):
+        evaluate_core_v1_displacement(inputs, liquidity_context=(acceptance,))

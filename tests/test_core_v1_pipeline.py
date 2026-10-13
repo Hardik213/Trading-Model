@@ -34,6 +34,7 @@ from src.core_v1_displacement import DisplacementStatus
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
+    ReactionKind,
     SweepKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
@@ -295,6 +296,28 @@ def test_pipeline_rejects_forged_reaction_on_genuine_visible_swing():
 
     with pytest.raises(ValueError, match="full assessment recomputed"):
         evaluate(kwargs, liquidity=forged, displacement=None)
+
+
+def test_pipeline_rejects_acceptance_reaction(monkeypatch):
+    fixture, kwargs = pipeline_fixture()
+    acceptance = replace(
+        fixture.liquidity,
+        reaction=replace(
+            fixture.liquidity.reaction,
+            kind=ReactionKind.ACCEPTANCE,
+        ),
+        sweep=SweepKind.UNRESOLVED,
+        sweep_timing=None,
+        sweep_provenance={},
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "evaluate_core_v1_liquidity",
+        lambda inputs, *, levels: (acceptance,),
+    )
+
+    with pytest.raises(ValueError, match="ACCEPTANCE reactions"):
+        evaluate(kwargs, liquidity=acceptance, displacement=None)
 
 
 def test_pipeline_rejects_opposing_candidate_without_visible_swing_recomputation():

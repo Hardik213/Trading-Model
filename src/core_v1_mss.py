@@ -391,6 +391,11 @@ def _validate_liquidity(
     _validate_component_subject(value.subject, inputs.subject, "Liquidity event")
     if not _liquidity_is_resolved(value):
         raise ValueError("Liquidity event is unresolved.")
+    if (
+        value.reaction is not None
+        and value.reaction.kind is ReactionKind.ACCEPTANCE
+    ):
+        raise ValueError("ACCEPTANCE reactions do not satisfy the MSS rejection prerequisite.")
     if value.level not in detect_core_v1_liquidity_levels(inputs):
         raise ValueError(
             "Liquidity level does not match a swing recomputed from visible base observations."

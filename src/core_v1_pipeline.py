@@ -23,6 +23,7 @@ from .core_v1_hypothesis import (
 from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
+    ReactionKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
@@ -360,6 +361,10 @@ def evaluate_core_v1_pipeline(
     if liquidity is not None:
         if not isinstance(liquidity, CoreV1LiquidityAssessment):
             raise TypeError("liquidity must be a CoreV1LiquidityAssessment.")
+        if liquidity.reaction is not None and liquidity.reaction.kind is ReactionKind.ACCEPTANCE:
+            raise ValueError(
+                "ACCEPTANCE reactions do not satisfy the pipeline rejection prerequisite."
+            )
         _validate_recomputed_liquidity_level(
             liquidity.level,
             visible_levels,

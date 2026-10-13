@@ -11,6 +11,7 @@ import pandas as pd
 from .core_v1_evidence import SubjectVisibleInputs
 from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
+    ReactionKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
@@ -151,6 +152,10 @@ def evaluate_core_v1_displacement(
             raise TypeError("liquidity_context must contain liquidity assessments.")
         if not same_subject_id(item.subject, inputs.subject):
             raise ValueError("Liquidity context belongs to another ReplaySubject.")
+        if item.reaction is not None and item.reaction.kind is ReactionKind.ACCEPTANCE:
+            raise ValueError(
+                "ACCEPTANCE reactions do not satisfy the displacement rejection prerequisite."
+            )
         if item.level not in visible_levels:
             raise ValueError(
                 "Liquidity context level does not match a swing recomputed from visible base observations."

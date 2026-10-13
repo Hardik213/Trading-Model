@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import pandas as pd
 import pytest
 
+import src.core_v1_mss as mss_module
 from src.core_v1_displacement import (
     CoreV1DisplacementAssessment,
     CoreV1DisplacementObservation,
@@ -32,6 +33,7 @@ from src.core_v1_mss import (
     CoreV1StructuralPoint,
     MSSStatus,
     _validate_component_subject,
+    _validate_liquidity,
     evaluate_core_v1_mss,
 )
 from src.displacement import Direction
@@ -436,6 +438,27 @@ def test_mss_rejects_forged_reaction_on_genuine_visible_swing():
 
     with pytest.raises(ValueError, match="full assessment recomputed"):
         evaluate(inputs, values)
+
+
+def test_mss_rejects_acceptance_reaction(monkeypatch):
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    canonical = values["liquidity_event"]
+    acceptance = replace(
+        canonical,
+        reaction=replace(canonical.reaction, kind=ReactionKind.ACCEPTANCE),
+        sweep=SweepKind.UNRESOLVED,
+        sweep_timing=None,
+        sweep_provenance={},
+    )
+    monkeypatch.setattr(
+        mss_module,
+        "evaluate_core_v1_liquidity",
+        lambda inputs, *, levels: (acceptance,),
+    )
+
+    with pytest.raises(ValueError, match="ACCEPTANCE reactions"):
+        _validate_liquidity(acceptance, inputs)
 
 
 def test_mss_component_subject_validation_uses_subject_id():
