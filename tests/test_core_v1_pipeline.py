@@ -34,6 +34,7 @@ from src.core_v1_displacement import DisplacementStatus
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
+    SweepKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
@@ -329,6 +330,9 @@ def test_pipeline_rejects_opposing_candidate_without_visible_swing_recomputation
                     fixture.liquidity,
                     breach=None,
                     reaction=None,
+                    sweep=SweepKind.UNRESOLVED,
+                    sweep_timing=None,
+                    sweep_provenance={},
                 )
             },
             "liquidity event is unresolved",
@@ -367,6 +371,21 @@ def test_missing_or_unresolved_prerequisite_blocks_every_later_stage(
         name: value(fixture) if callable(value) else value
         for name, value in overrides.items()
     }
+    if expected_reason == "liquidity event is unresolved":
+        breach_timestamp = fixture.liquidity.breach.timing.event_timestamp
+        unresolved_inputs = replace(
+            kwargs["inputs"],
+            base_observations=tuple(
+                observation
+                for observation in kwargs["inputs"].base_observations
+                if observation.timing.event_timestamp < breach_timestamp
+            ),
+        )
+        (resolved["liquidity"],) = evaluate_core_v1_liquidity(
+            unresolved_inputs,
+            levels=(fixture.liquidity.level,),
+        )
+        kwargs["inputs"] = unresolved_inputs
     entry_resolver = kwargs["entry_resolver"]
     result = evaluate(kwargs, **resolved)
 

@@ -18,12 +18,9 @@ from src.core_v1_evidence import (
 )
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
-    CoreV1LiquidityBreach,
     CoreV1LiquidityLevel,
-    CoreV1LiquidityReaction,
-    ReactionKind,
-    SweepKind,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 from src.core_v1_mss import (
     CoreV1MSSConfirmation,
@@ -222,35 +219,9 @@ def make_fixture() -> Fixture:
         if candidate.timing.event_timestamp
         == sources["liquidity-level"].event_timestamp
     )
-    breach = CoreV1LiquidityBreach(
-        current,
-        level,
-        107.0,
-        make_timing(
-            "2026-01-01T10:01:00Z",
-            (*level.timing.source_observations, sources["liquidity-breach"]),
-        ),
-    )
-    reaction = CoreV1LiquidityReaction(
-        current,
-        breach,
-        ReactionKind.REJECTION,
-        make_timing(
-            "2026-01-01T10:01:00Z",
-            (
-                *breach.timing.source_observations,
-                sources["liquidity-confirmation"],
-            ),
-            confirmation="2026-01-01T10:01:30Z",
-        ),
-        106.0,
-    )
-    liquidity = CoreV1LiquidityAssessment(
-        current,
-        level,
-        breach=breach,
-        reaction=reaction,
-        sweep=SweepKind.UNRESOLVED,
+    (liquidity,) = evaluate_core_v1_liquidity(
+        inputs,
+        levels=(level,),
     )
     displacement_source = sources["displacement"]
     displacement_confirmation = sources["displacement-confirmation"]

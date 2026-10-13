@@ -11,11 +11,8 @@ from src.core_v1_decision_bridge import CoreV1QuantityInput
 from src.core_v1_evidence import SubjectVisibleInputs
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
-    CoreV1LiquidityBreach,
-    CoreV1LiquidityReaction,
-    ReactionKind,
-    SweepKind,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 from src.core_v1_mss import evaluate_core_v1_mss
 from src.core_v1_pipeline import CoreV1PipelineResult
@@ -292,54 +289,9 @@ def short_pipeline_from_visible_bars(inputs, source_kwargs, template, template_s
     assert len(level_candidates) == 1
     (level,) = level_candidates
 
-    breach_observation = next(
-        observation
-        for observation in inputs.base_observations
-        if observation.timing.event_timestamp == ts("2026-01-01T10:01:00Z")
-    )
-    breach_source = breach_observation.timing.source_observations[0]
-    breach_timing = EvidenceTiming.from_inputs(
-        event_timestamp=breach_source.event_timestamp,
-        source_observations=(*level.timing.source_observations, breach_source),
-        provenance={"test_fixture": "visible SSL breach bar"},
-        base_bar_scoped=True,
-    )
-    breach = CoreV1LiquidityBreach(
-        subject=inputs.subject,
-        level=level,
-        price=float(breach_observation.value["low"]),
-        timing=breach_timing,
-    )
-
-    reaction_observation = next(
-        observation
-        for observation in inputs.base_observations
-        if observation.timing.event_timestamp == ts("2026-01-01T10:01:30Z")
-    )
-    reaction_source = reaction_observation.timing.source_observations[0]
-    reaction_timing = EvidenceTiming.from_inputs(
-        event_timestamp=breach.timing.event_timestamp,
-        confirmation_timestamp=reaction_source.event_timestamp,
-        source_observations=(
-            *breach.timing.source_observations,
-            reaction_source,
-        ),
-        provenance={"test_fixture": "visible SSL rejection bar"},
-        base_bar_scoped=True,
-    )
-    reaction = CoreV1LiquidityReaction(
-        subject=inputs.subject,
-        breach=breach,
-        kind=ReactionKind.REJECTION,
-        timing=reaction_timing,
-        price=float(reaction_observation.value["high"]),
-    )
-    liquidity = CoreV1LiquidityAssessment(
-        subject=inputs.subject,
-        level=level,
-        breach=breach,
-        reaction=reaction,
-        sweep=SweepKind.UNRESOLVED,
+    (liquidity,) = evaluate_core_v1_liquidity(
+        inputs,
+        levels=(level,),
     )
 
     rebound = rebind_subject(template, template_subject, inputs.subject)
