@@ -683,6 +683,16 @@ def test_rejection_confirmation_with_duplicate_base_timestamps_fails_closed():
         inputs,
         base_observations=(*inputs.base_observations, duplicate_observation),
     )
+    ambiguous_reaction = replace(
+        reaction_value,
+        timing=replace(
+            reaction_value.timing,
+            source_observations=(
+                *reaction_value.timing.source_observations,
+                duplicate_source,
+            ),
+        ),
+    )
 
     with pytest.raises(
         ValueError,
@@ -691,9 +701,53 @@ def test_rejection_confirmation_with_duplicate_base_timestamps_fails_closed():
         _validate_reaction(
             duplicate_inputs,
             breach_value,
-            reaction_value,
+            ambiguous_reaction,
             _visible_sources(duplicate_inputs),
         )
+
+
+def test_rejection_confirmation_with_duplicate_timestamp_uses_source_provenance():
+    inputs = make_inputs()
+    candidate = level(inputs)
+    breach_value = breach(inputs, candidate)
+    reaction_value = reaction(inputs, breach_value, ReactionKind.REJECTION)
+    confirmation_source = reaction_value.timing.source_observations[-1]
+    duplicate_source = replace(
+        confirmation_source,
+        source_id="duplicate-reaction-confirmation",
+        provenance={
+            **confirmation_source.provenance,
+            "source_id": "duplicate-reaction-confirmation",
+        },
+    )
+    confirmation_observation = next(
+        observation
+        for observation in inputs.base_observations
+        if confirmation_source in observation.timing.source_observations
+    )
+    duplicate_observation = replace(
+        confirmation_observation,
+        value={
+            **confirmation_observation.value,
+            "Low": float(confirmation_observation.value["Low"]) + 1.0,
+        },
+        timing=EvidenceTiming.from_inputs(
+            event_timestamp=duplicate_source.event_timestamp,
+            source_observations=(duplicate_source,),
+            base_bar_scoped=True,
+        ),
+    )
+    duplicate_inputs = replace(
+        inputs,
+        base_observations=(*inputs.base_observations, duplicate_observation),
+    )
+
+    _validate_reaction(
+        duplicate_inputs,
+        breach_value,
+        reaction_value,
+        _visible_sources(duplicate_inputs),
+    )
 
 
 def test_breach_event_and_availability_are_distinct():

@@ -912,10 +912,18 @@ def _validate_reaction(
         observed_price_key = (
             "low" if breach.level.side is LiquiditySide.BSL else "high"
         )
+        confirmation_sources = tuple(
+            source
+            for source in reaction.timing.source_observations
+            if source.event_timestamp == confirmation
+            and source not in breach.timing.source_observations
+        )
         confirmation_observations = tuple(
             observation
             for observation in inputs.base_observations
             if observation.timing.event_timestamp == confirmation
+            and len(observation.timing.source_observations) == 1
+            and observation.timing.source_observations[0] in confirmation_sources
         )
         if len(confirmation_observations) != 1:
             raise ValueError(
