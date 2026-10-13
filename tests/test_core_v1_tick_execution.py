@@ -17,6 +17,7 @@ from src.core_v1_liquidity import (
 from src.core_v1_mss import evaluate_core_v1_mss
 from src.core_v1_pipeline import CoreV1PipelineResult
 from src.core_v1_pipeline import evaluate_core_v1_pipeline
+import src.core_v1_tick_execution as tick_execution_module
 from src.core_v1_tick_execution import CoreV1TickExecution
 from src.displacement import Direction
 from src.evidence_timing import EvidenceTiming
@@ -163,6 +164,7 @@ def integration(
     pipeline_builder=None,
     allow_custom_pipeline_builder=False,
     pipeline_builder_identity=None,
+    pipeline_inputs_provider=None,
     evidence_enricher=None,
     quantity_provider=None,
     order_type="MARKET",
@@ -174,6 +176,7 @@ def integration(
         pipeline_builder=pipeline_builder,
         allow_custom_pipeline_builder=allow_custom_pipeline_builder,
         pipeline_builder_identity=pipeline_builder_identity,
+        pipeline_inputs_provider=pipeline_inputs_provider,
         evidence_enricher=evidence_enricher,
         quantity_provider=quantity_provider,
         order_type=order_type,
@@ -213,10 +216,11 @@ def incomplete_builder(inputs):
     )
 
 
-def test_pipeline_builder_defaults_to_canonical_evaluator():
+def test_production_pipeline_configuration_uses_canonical_evaluator():
     instance = integration()
 
-    assert instance.pipeline_builder is evaluate_core_v1_pipeline
+    assert instance.pipeline_builder is None
+    assert instance.pipeline_inputs_provider is None
     assert (
         instance.pipeline_builder_identity
         == "src.core_v1_pipeline.evaluate_core_v1_pipeline"
@@ -257,6 +261,76 @@ def test_explicitly_opted_in_pipeline_builder_is_invoked():
         instance._subject_executions[0].pipeline_builder_identity
         == "tests.test_core_v1_tick_execution.opted_in_builder"
     )
+
+
+def test_production_execution_uses_canonical_pipeline_for_january_2022_ticks(
+    monkeypatch,
+):
+    calls = []
+
+    def canonical_spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return evaluate_core_v1_pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(
+        tick_execution_module,
+        "evaluate_core_v1_pipeline",
+        canonical_spy,
+    )
+    supplied_inputs = []
+
+    class Resolver:
+        def resolve(self, inputs):
+            return None
+
+    resolver = Resolver()
+
+    def provide_pipeline_kwargs(inputs):
+        supplied_inputs.append(inputs)
+        return {"context_resolver": resolver}
+
+    instance = integration(pipeline_inputs_provider=provide_pipeline_kwargs)
+    report = instance.run(
+        [
+            tick("2022-01-03T10:00:05Z", 0),
+            tick("2022-01-03T10:01:05Z", 1),
+        ]
+    )
+
+    assert len(calls) == 1
+    assert len(supplied_inputs) == 1
+    assert isinstance(supplied_inputs[0], SubjectVisibleInputs)
+    assert calls[0][1]["inputs"] is supplied_inputs[0]
+    assert calls[0][1]["context_resolver"] is resolver
+    assert report.replay_summary.subjects_processed == 1
+    assert len(report.subject_executions) == 1
+    result = report.subject_executions[0].pipeline_result
+    assert isinstance(result, CoreV1PipelineResult)
+    assert report.subject_executions[0].pipeline_builder_identity == (
+        "src.core_v1_pipeline.evaluate_core_v1_pipeline"
+    )
+
+
+def test_direct_canonical_pipeline_api_requires_no_test_opt_in():
+    kwargs, _ = template_fixture()
+
+    result = evaluate_core_v1_pipeline(**kwargs)
+
+    assert isinstance(result, CoreV1PipelineResult)
+
+
+def test_pipeline_inputs_provider_cannot_replace_visible_inputs():
+    instance = integration(
+        pipeline_inputs_provider=lambda _: {"inputs": object()},
+    )
+
+    with pytest.raises(ValueError, match="must not replace the visible inputs"):
+        instance.run(
+            [
+                tick("2022-01-03T10:00:05Z", 0),
+                tick("2022-01-03T10:01:05Z", 1),
+            ]
+        )
 
 
 def short_pipeline_from_visible_bars(inputs, source_kwargs, template, template_subject):

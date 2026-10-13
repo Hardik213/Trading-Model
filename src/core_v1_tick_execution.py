@@ -39,6 +39,10 @@ from .timeframe_context import TimeframeContext
 
 
 PipelineBuilder = Callable[[SubjectVisibleInputs], CoreV1PipelineResult]
+PipelineInputsProvider = Callable[
+    [SubjectVisibleInputs],
+    Mapping[str, object],
+]
 QuantityProvider = Callable[[CoreV1PipelineResult], CoreV1QuantityInput | None]
 EvidenceEnricher = Callable[[SubjectVisibleInputs], SubjectVisibleInputs]
 
@@ -84,6 +88,7 @@ class CoreV1TickExecution:
         pipeline_builder: PipelineBuilder | None = None,
         allow_custom_pipeline_builder: bool = False,
         pipeline_builder_identity: str | None = None,
+        pipeline_inputs_provider: PipelineInputsProvider | None = None,
         evidence_enricher: EvidenceEnricher | None = None,
         quantity_provider: QuantityProvider | None = None,
         order_type: str = "MARKET",
@@ -92,12 +97,19 @@ class CoreV1TickExecution:
             raise TypeError("execution must be the existing stateful ExecutionEngine.")
         if type(allow_custom_pipeline_builder) is not bool:
             raise TypeError("allow_custom_pipeline_builder must be a bool.")
+        if pipeline_inputs_provider is not None and not callable(
+            pipeline_inputs_provider
+        ):
+            raise TypeError("pipeline_inputs_provider must be callable or None.")
+        if pipeline_builder is not None and pipeline_inputs_provider is not None:
+            raise ValueError(
+                "Supply pipeline_inputs_provider or a test-only pipeline_builder, not both."
+            )
         if pipeline_builder is None:
             if pipeline_builder_identity is not None:
                 raise ValueError(
                     "pipeline_builder_identity is only valid with a custom pipeline_builder."
                 )
-            pipeline_builder = evaluate_core_v1_pipeline
             pipeline_builder_identity = (
                 "src.core_v1_pipeline.evaluate_core_v1_pipeline"
             )
@@ -131,6 +143,7 @@ class CoreV1TickExecution:
         self.execution = execution
         self.pipeline_builder = pipeline_builder
         self.pipeline_builder_identity = pipeline_builder_identity
+        self.pipeline_inputs_provider = pipeline_inputs_provider
         self.evidence_enricher = evidence_enricher
         self.quantity_provider = quantity_provider
         self.order_type = order_type
@@ -199,7 +212,26 @@ class CoreV1TickExecution:
                 raise ValueError("Evidence enrichment must preserve ReplaySubject identity.")
             if visible_inputs.availability_timestamp != timestamp:
                 raise ValueError("Evidence enrichment must preserve subject availability.")
-        pipeline_result = self.pipeline_builder(visible_inputs)
+        if self.pipeline_builder is None:
+            pipeline_kwargs = (
+                {}
+                if self.pipeline_inputs_provider is None
+                else self.pipeline_inputs_provider(visible_inputs)
+            )
+            if not isinstance(pipeline_kwargs, Mapping):
+                raise TypeError(
+                    "pipeline_inputs_provider must return a mapping of pipeline keyword arguments."
+                )
+            if "inputs" in pipeline_kwargs:
+                raise ValueError(
+                    "pipeline_inputs_provider must not replace the visible inputs."
+                )
+            pipeline_result = evaluate_core_v1_pipeline(
+                inputs=visible_inputs,
+                **dict(pipeline_kwargs),
+            )
+        else:
+            pipeline_result = self.pipeline_builder(visible_inputs)
         if not isinstance(pipeline_result, CoreV1PipelineResult):
             raise TypeError("pipeline_builder must return CoreV1PipelineResult.")
         if not same_subject_id(pipeline_result.subject, subject):
@@ -421,5 +453,6 @@ __all__ = [
     "CoreV1TickExecutionReport",
     "EvidenceEnricher",
     "PipelineBuilder",
+    "PipelineInputsProvider",
     "QuantityProvider",
 ]
