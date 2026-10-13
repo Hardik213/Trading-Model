@@ -7,7 +7,11 @@ import pytest
 
 from src.core_v1_evidence import ObservationScope, SubjectVisibleObservation
 from src.core_v1_dealing_range import DealingRangeContext, DealingRangeStatus
-from src.core_v1_mss import CoreV1MSSResult, MSSStatus
+from src.core_v1_mss import (
+    CoreV1MSSResult,
+    MSSStatus,
+    evaluate_core_v1_mss,
+)
 from src.core_v1_pipeline import evaluate_core_v1_pipeline
 from src.core_v1_reactionary_zones import CoreV1OrderBlockObservation
 from src.evidence_timing import EvidenceTiming
@@ -31,6 +35,7 @@ from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 
 
@@ -128,6 +133,20 @@ def pipeline_fixture():
         *target.liquidity_level.timing.source_observations,
     )
     inputs = with_extra_visible(fixture.inputs, added_sources)
+    (liquidity,) = evaluate_core_v1_liquidity(
+        inputs,
+        levels=(fixture.liquidity.level,),
+    )
+    mss = evaluate_core_v1_mss(
+        inputs,
+        structural_point=fixture.mss.structural_point,
+        liquidity_event=liquidity,
+        displacement=fixture.displacement,
+        structural_break=fixture.mss.structural_break,
+        confirmation=fixture.mss.confirmation,
+    )
+    fixture.liquidity = liquidity
+    fixture.mss = mss
     entry_sources = list(fixture.planned_entry.timing.source_observations)
     for source in added_sources:
         if source not in entry_sources:
@@ -156,6 +175,15 @@ def evaluate(kwargs, **overrides):
     arguments = dict(kwargs)
     arguments.update(overrides)
     return evaluate_core_v1_pipeline(**arguments)
+
+
+def _visible_price_at(inputs, timestamp, field):
+    (observation,) = tuple(
+        observation
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp == timestamp
+    )
+    return float(observation.value[field])
 
 
 def test_complete_governed_pipeline_preserves_all_stages_and_timing():
@@ -213,6 +241,59 @@ def test_pipeline_rejects_liquidity_level_without_visible_swing_recomputation():
 
     with pytest.raises(ValueError, match="recomputed from visible base observations"):
         evaluate(kwargs, liquidity=fabricated)
+
+
+def test_pipeline_rejects_forged_breach_on_genuine_visible_swing():
+    fixture, kwargs = pipeline_fixture()
+    canonical = fixture.liquidity
+    assert canonical.level in detect_core_v1_liquidity_levels(kwargs["inputs"])
+    assert canonical.breach.price == _visible_price_at(
+        kwargs["inputs"],
+        canonical.breach.timing.event_timestamp,
+        "high",
+    )
+    other_visible_high = next(
+        float(observation.value["high"])
+        for observation in kwargs["inputs"].base_observations
+        if observation.timing.event_timestamp
+        != canonical.breach.timing.event_timestamp
+        and float(observation.value["high"]) > canonical.level.price
+    )
+    forged_breach = replace(canonical.breach, price=other_visible_high)
+    forged = replace(
+        canonical,
+        breach=forged_breach,
+        reaction=replace(canonical.reaction, breach=forged_breach),
+    )
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate(kwargs, liquidity=forged, displacement=None)
+
+
+def test_pipeline_rejects_forged_reaction_on_genuine_visible_swing():
+    fixture, kwargs = pipeline_fixture()
+    canonical = fixture.liquidity
+    confirmation_price = _visible_price_at(
+        kwargs["inputs"],
+        canonical.reaction.timing.confirmation_timestamp,
+        "low",
+    )
+    assert canonical.reaction.price == confirmation_price
+    other_visible_low = next(
+        float(observation.value["low"])
+        for observation in kwargs["inputs"].base_observations
+        if observation.timing.event_timestamp
+        != canonical.reaction.timing.confirmation_timestamp
+        and float(observation.value["low"]) != canonical.reaction.price
+        and float(observation.value["low"]) <= canonical.level.price
+    )
+    forged = replace(
+        canonical,
+        reaction=replace(canonical.reaction, price=other_visible_low),
+    )
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate(kwargs, liquidity=forged, displacement=None)
 
 
 def test_pipeline_rejects_opposing_candidate_without_visible_swing_recomputation():

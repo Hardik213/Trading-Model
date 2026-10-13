@@ -24,6 +24,7 @@ from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 from .core_v1_mss import CoreV1MSSResult, MSSStatus, evaluate_core_v1_mss
 from .core_v1_reactionary_zones import (
@@ -364,6 +365,18 @@ def evaluate_core_v1_pipeline(
             visible_levels,
             "Liquidity",
         )
+        (recomputed_liquidity,) = evaluate_core_v1_liquidity(
+            inputs,
+            levels=(liquidity.level,),
+        )
+        if (
+            liquidity.level != recomputed_liquidity.level
+            or liquidity.breach != recomputed_liquidity.breach
+            or liquidity.reaction != recomputed_liquidity.reaction
+        ):
+            raise ValueError(
+                "Liquidity assessment does not match a full assessment recomputed from visible base observations."
+            )
     if target is not None:
         if not isinstance(target, CoreV1OpposingLiquidityTarget):
             raise TypeError("target must be a CoreV1OpposingLiquidityTarget.")

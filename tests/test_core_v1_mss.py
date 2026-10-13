@@ -23,6 +23,7 @@ from src.core_v1_liquidity import (
     ReactionKind,
     SweepKind,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 from src.core_v1_mss import (
     CoreV1MSSConfirmation,
@@ -199,40 +200,47 @@ def components(
             for candidate in detect_core_v1_liquidity_levels(inputs)
             if candidate.timing.event_timestamp == level_source.event_timestamp
         )
-        liquidity_breach = CoreV1LiquidityBreach(
-            subject=inputs.subject,
-            level=level,
-            price=107.0,
-            timing=timing(
-                liquidity_time,
-                (*level.timing.source_observations, breach_source),
-                base_scoped=True,
-            ),
-        )
-        reaction = None
-        if liquidity_resolved:
-            reaction = CoreV1LiquidityReaction(
+        if liquidity_resolved and liquidity_time == "2026-01-01T10:01:00Z":
+            (liquidity,) = evaluate_core_v1_liquidity(
+                inputs,
+                levels=(level,),
+            )
+            liquidity_breach = liquidity.breach
+        else:
+            liquidity_breach = CoreV1LiquidityBreach(
                 subject=inputs.subject,
-                breach=liquidity_breach,
-                kind=ReactionKind.REJECTION,
+                level=level,
+                price=107.0,
                 timing=timing(
                     liquidity_time,
-                    (
-                        *liquidity_breach.timing.source_observations,
-                        reaction_source,
-                    ),
-                    confirmation=reaction_source.event_timestamp.isoformat(),
-                    provenance={"resolver": "governed fixture"},
+                    (*level.timing.source_observations, breach_source),
+                    base_scoped=True,
                 ),
-                price=106.0,
             )
-        liquidity = CoreV1LiquidityAssessment(
-            subject=inputs.subject,
-            level=level,
-            breach=liquidity_breach,
-            reaction=reaction,
-            sweep=SweepKind.UNRESOLVED,
-        )
+            reaction = None
+            if liquidity_resolved:
+                reaction = CoreV1LiquidityReaction(
+                    subject=inputs.subject,
+                    breach=liquidity_breach,
+                    kind=ReactionKind.REJECTION,
+                    timing=timing(
+                        liquidity_time,
+                        (
+                            *liquidity_breach.timing.source_observations,
+                            reaction_source,
+                        ),
+                        confirmation=reaction_source.event_timestamp.isoformat(),
+                        provenance={"resolver": "governed fixture"},
+                    ),
+                    price=106.0,
+                )
+            liquidity = CoreV1LiquidityAssessment(
+                subject=inputs.subject,
+                level=level,
+                breach=liquidity_breach,
+                reaction=reaction,
+                sweep=SweepKind.UNRESOLVED,
+            )
 
     displacement = None
     if displacement_present:
@@ -321,6 +329,19 @@ def evaluate(
     )
 
 
+def _visible_price_at(
+    inputs: SubjectVisibleInputs,
+    timestamp: pd.Timestamp,
+    field: str,
+) -> float:
+    (observation,) = tuple(
+        observation
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp == timestamp
+    )
+    return float(observation.value[field])
+
+
 def test_valid_mss_requires_all_governed_components():
     inputs, sources = visible_inputs()
     values = components(inputs, sources)
@@ -352,9 +373,68 @@ def test_mss_rejects_liquidity_level_not_recomputed_from_visible_bars():
         level=fabricated_level,
         breach=breach,
         reaction=reaction,
+        sweep=SweepKind.UNRESOLVED,
+        sweep_timing=None,
+        sweep_provenance={},
     )
 
     with pytest.raises(ValueError, match="recomputed from visible base observations"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_forged_breach_on_genuine_visible_swing():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    canonical = values["liquidity_event"]
+    assert canonical.level in detect_core_v1_liquidity_levels(inputs)
+    assert canonical.breach.price == _visible_price_at(
+        inputs,
+        canonical.breach.timing.event_timestamp,
+        "high",
+    )
+    other_visible_high = next(
+        float(observation.value["high"])
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp
+        != canonical.breach.timing.event_timestamp
+        and float(observation.value["high"]) > canonical.level.price
+    )
+    forged_breach = replace(canonical.breach, price=other_visible_high)
+    forged = replace(
+        canonical,
+        breach=forged_breach,
+        reaction=replace(canonical.reaction, breach=forged_breach),
+    )
+    values["liquidity_event"] = forged
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_forged_reaction_on_genuine_visible_swing():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    canonical = values["liquidity_event"]
+    confirmation_price = _visible_price_at(
+        inputs,
+        canonical.reaction.timing.confirmation_timestamp,
+        "low",
+    )
+    assert canonical.reaction.price == confirmation_price
+    other_visible_low = next(
+        float(observation.value["low"])
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp
+        != canonical.reaction.timing.confirmation_timestamp
+        and float(observation.value["low"]) <= canonical.level.price
+    )
+    forged = replace(
+        canonical,
+        reaction=replace(canonical.reaction, price=other_visible_low),
+    )
+    values["liquidity_event"] = forged
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
         evaluate(inputs, values)
 
 

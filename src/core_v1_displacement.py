@@ -12,6 +12,7 @@ from .core_v1_evidence import SubjectVisibleInputs
 from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 from .displacement import Direction
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
@@ -153,6 +154,18 @@ def evaluate_core_v1_displacement(
         if item.level not in visible_levels:
             raise ValueError(
                 "Liquidity context level does not match a swing recomputed from visible base observations."
+            )
+        (recomputed,) = evaluate_core_v1_liquidity(
+            inputs,
+            levels=(item.level,),
+        )
+        if (
+            item.level != recomputed.level
+            or item.breach != recomputed.breach
+            or item.reaction != recomputed.reaction
+        ):
+            raise ValueError(
+                "Liquidity context assessment does not match a full assessment recomputed from visible base observations."
             )
 
     candidate = observation

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 import pytest
@@ -103,6 +103,48 @@ def make_inputs(
         availability_timestamp=subject.availability_timestamp,
         base_observations=base,
         context_observations=context,
+    )
+
+
+def visible_swing_assessment_inputs() -> SubjectVisibleInputs:
+    current = make_subject()
+    bars = (
+        (102.0, 104.0, 100.0, 102.0),
+        (103.0, 105.0, 99.0, 104.0),
+        (104.0, 106.0, 101.0, 105.0),
+        (104.0, 105.0, 100.0, 103.0),
+        (102.0, 104.0, 98.0, 102.0),
+        (103.0, 108.0, 101.0, 107.0),
+        (104.0, 107.0, 100.0, 106.0),
+    )
+    timestamps = (
+        "2026-01-01T09:59:00Z",
+        "2026-01-01T10:00:00Z",
+        "2026-01-01T10:01:00Z",
+        "2026-01-01T10:02:00Z",
+        "2026-01-01T10:03:00Z",
+        "2026-01-01T10:04:00Z",
+        "2026-01-01T10:05:00Z",
+    )
+    base_observations = tuple(
+        visible_observation(
+            source(
+                f"assessment-bar-{index}",
+                timestamp,
+                (pd.Timestamp(timestamp) + pd.Timedelta(seconds=1)).isoformat(),
+            ),
+            value={
+                **dict(zip(("open", "high", "low", "close"), bar)),
+                "source_id": f"assessment-bar-{index}",
+            },
+        )
+        for index, (bar, timestamp) in enumerate(zip(bars, timestamps))
+    )
+    return SubjectVisibleInputs(
+        subject=current,
+        availability_timestamp=current.availability_timestamp,
+        base_observations=base_observations,
+        context_observations=(),
     )
 
 
@@ -422,3 +464,71 @@ def test_displacement_rejects_liquidity_context_without_recomputed_swing():
 
     with pytest.raises(ValueError, match="recomputed from visible base observations"):
         evaluate_core_v1_displacement(inputs, liquidity_context=(assessment,))
+
+
+def test_displacement_rejects_forged_breach_on_genuine_visible_swing():
+    inputs = visible_swing_assessment_inputs()
+    (level,) = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.side is LiquiditySide.BSL
+    )
+    (canonical,) = evaluate_core_v1_liquidity(inputs, levels=(level,))
+    assert canonical.breach.price == float(
+        next(
+            observation.value["high"]
+            for observation in inputs.base_observations
+            if observation.timing.event_timestamp
+            == canonical.breach.timing.event_timestamp
+        )
+    )
+    other_visible_high = next(
+        float(observation.value["high"])
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp
+        != canonical.breach.timing.event_timestamp
+        and float(observation.value["high"]) > level.price
+    )
+    forged_breach = replace(canonical.breach, price=other_visible_high)
+    forged = replace(
+        canonical,
+        breach=forged_breach,
+        reaction=replace(canonical.reaction, breach=forged_breach),
+    )
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate_core_v1_displacement(inputs, liquidity_context=(forged,))
+
+
+def test_displacement_rejects_forged_reaction_on_genuine_visible_swing():
+    inputs = visible_swing_assessment_inputs()
+    (level,) = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.side is LiquiditySide.BSL
+    )
+    (canonical,) = evaluate_core_v1_liquidity(inputs, levels=(level,))
+    confirmation_price = float(
+        next(
+            observation.value["low"]
+            for observation in inputs.base_observations
+            if observation.timing.event_timestamp
+            == canonical.reaction.timing.confirmation_timestamp
+        )
+    )
+    assert canonical.reaction.price == confirmation_price
+    other_visible_low = next(
+        float(observation.value["low"])
+        for observation in inputs.base_observations
+        if observation.timing.event_timestamp
+        != canonical.reaction.timing.confirmation_timestamp
+        and float(observation.value["low"]) != canonical.reaction.price
+        and float(observation.value["low"]) <= level.price
+    )
+    forged = replace(
+        canonical,
+        reaction=replace(canonical.reaction, price=other_visible_low),
+    )
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate_core_v1_displacement(inputs, liquidity_context=(forged,))

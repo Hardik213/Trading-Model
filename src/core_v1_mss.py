@@ -15,6 +15,7 @@ from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     ReactionKind,
     detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
 )
 from .displacement import Direction
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
@@ -396,6 +397,18 @@ def _validate_liquidity(
         )
     assert value.breach is not None
     assert value.reaction is not None
+    (recomputed,) = evaluate_core_v1_liquidity(
+        inputs,
+        levels=(value.level,),
+    )
+    if (
+        value.level != recomputed.level
+        or value.breach != recomputed.breach
+        or value.reaction != recomputed.reaction
+    ):
+        raise ValueError(
+            "Liquidity assessment does not match a full assessment recomputed from visible base observations."
+        )
     value.breach.timing.validate_for_subject(inputs.subject)
     value.reaction.timing.validate_for_subject(inputs.subject)
     _validate_visible_lineage(value.level.timing, inputs, "Liquidity level")
