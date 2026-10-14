@@ -454,7 +454,7 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
                 ExecutionDirection.LONG,
                 ExecutionDirection.SHORT,
             }
-            super().submit_decision_set(decision_set)
+            return super().submit_decision_set(decision_set)
 
     instance = integration(
         execution_engine=DirectionCheckingExecution(
@@ -491,6 +491,7 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
     actionable = [item for item in decisions if item.actionable]
     assert len(actionable) == 2
     assert len({item.direction for item in actionable}) == 2
+    assert len(report.execution_results) == 2
     assert all(
         item.status is ExecutionStatus.NO_TRADE_CONFLICTING_DIRECTIONS
         for item in report.execution_results
