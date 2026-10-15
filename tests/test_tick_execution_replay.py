@@ -210,7 +210,7 @@ def test_shared_window_boundary_is_excluded_then_included_once():
     assert processed == [boundary]
 
 
-def test_warmup_ticks_initialize_aggregation_without_execution_callbacks():
+def test_completed_warmup_bar_is_retained_without_decisions_or_callbacks():
     start = _ts("2026-01-01T00:01:30Z")
     aggregator = _TrackingTickAggregator("1min")
     five_minute_aggregator = _TrackingTickAggregator("5min")
@@ -251,6 +251,11 @@ def test_warmup_ticks_initialize_aggregation_without_execution_callbacks():
     assert summary.ticks_processed == 6
     assert strategy_calls[0][0] == _ts("2026-01-01T00:02:00Z")
     assert all(timestamp >= start for timestamp, *_ in strategy_calls)
+    first_visible_base = strategy_calls[0][2]
+    assert _ts("2026-01-01T00:00:00Z") in first_visible_base.index
+    assert first_visible_base.loc[
+        _ts("2026-01-01T00:00:00Z"), "available_at"
+    ] == _ts("2026-01-01T00:01:00Z")
     assert [item.available_at for item in decision_sets] == [
         _ts("2026-01-01T00:02:00Z"),
         _ts("2026-01-01T00:03:00Z"),
