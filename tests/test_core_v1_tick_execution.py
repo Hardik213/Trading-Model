@@ -52,12 +52,23 @@ def tick(value: str, order: int, bid: float = 100.0, ask: float = 100.5) -> Quot
     )
 
 
-def replay(*, base: str = "1min", limits=None):
+def replay(
+    *,
+    base: str = "1min",
+    limits=None,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+):
     history_limits = limits or {"1min": 32}
     if base not in history_limits:
         history_limits[base] = 32
     return IncrementalHistoricalReplay(
-        config=ReplayConfig(timeframe=base, source="CANONICAL_TEST"),
+        config=ReplayConfig(
+            timeframe=base,
+            source="CANONICAL_TEST",
+            start=start,
+            end=end,
+        ),
         history_limits=history_limits,
         max_pending_groups=16,
         max_pending_bars=128,
@@ -260,6 +271,41 @@ def test_explicitly_opted_in_pipeline_builder_is_invoked():
     assert (
         instance._subject_executions[0].pipeline_builder_identity
         == "tests.test_core_v1_tick_execution.opted_in_builder"
+    )
+
+
+def test_core_v1_warmup_seeds_provenance_without_execution(monkeypatch):
+    start = ts("2026-01-01T00:00:30Z")
+    instance = integration(
+        replay_engine=replay(start=start, end=ts("2026-01-01T00:02:00Z")),
+        pipeline_builder=incomplete_builder,
+        allow_custom_pipeline_builder=True,
+        pipeline_builder_identity="tests.test_core_v1_tick_execution.warmup",
+    )
+    processed = []
+    original_process_tick = instance.execution.process_tick
+
+    def record_execution(tick_value):
+        processed.append(tick_value)
+        return original_process_tick(tick_value)
+
+    monkeypatch.setattr(instance.execution, "process_tick", record_execution)
+    warmup = [tick("2026-01-01T00:00:00Z", 0)]
+    execution_ticks = [
+        tick("2026-01-01T00:00:30Z", 1),
+        tick("2026-01-01T00:01:00Z", 2),
+    ]
+
+    report = instance.run(execution_ticks, warmup_ticks=warmup)
+
+    assert processed == execution_ticks
+    assert report.replay_summary.ticks_processed == 2
+    assert len(report.subject_executions) == 1
+    source = report.subject_executions[0].visible_inputs.base_observations[0]
+    canonical_ticks = source.timing.source_observations[0].provenance["canonical_ticks"]
+    assert [item["source_order"] for item in canonical_ticks] == [0, 1]
+    assert report.subject_executions[0].pipeline_builder_identity == (
+        "tests.test_core_v1_tick_execution.warmup"
     )
 
 

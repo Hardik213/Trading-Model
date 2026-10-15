@@ -101,6 +101,7 @@ def _decision(subject: ReplaySubject, *, quantity: float | None = 1.0) -> Decisi
 def _run(
     ticks: list[QuoteEvent],
     *,
+    warmup_ticks: list[QuoteEvent] | None = None,
     replay: IncrementalHistoricalReplay | None = None,
     aggregators: dict[str, TickAggregator] | None = None,
     strategy_callback=None,
@@ -139,7 +140,10 @@ def _run(
         on_tick=receive_tick,
         on_decision_set=receive_decisions,
     )
-    summary = orchestrator.run(ticks)
+    summary = orchestrator.run(
+        ticks,
+        warmup_ticks=() if warmup_ticks is None else warmup_ticks,
+    )
     return summary, strategy_calls, tick_calls, decision_sets
 
 
@@ -204,6 +208,182 @@ def test_shared_window_boundary_is_excluded_then_included_once():
     assert [tick.timestamp for tick in second_tick_calls] == [boundary]
     assert second_aggregator.received_timestamps == [boundary]
     assert processed == [boundary]
+
+
+def test_warmup_ticks_initialize_aggregation_without_execution_callbacks():
+    start = _ts("2026-01-01T00:01:30Z")
+    aggregator = _TrackingTickAggregator("1min")
+    five_minute_aggregator = _TrackingTickAggregator("5min")
+    warmup = [
+        _tick("2026-01-01T00:00:00Z", 0, bid=100.0, ask=101.0),
+        _tick("2026-01-01T00:00:30Z", 1, bid=101.0, ask=102.0),
+        _tick("2026-01-01T00:01:00Z", 2, bid=102.0, ask=103.0),
+        _tick("2026-01-01T00:01:15Z", 3, bid=108.0, ask=109.0),
+    ]
+    execution = [
+        _tick("2026-01-01T00:01:30Z", 4, bid=104.0, ask=105.0),
+        _tick("2026-01-01T00:01:59Z", 5, bid=105.0, ask=106.0),
+        _tick("2026-01-01T00:02:00Z", 6, bid=106.0, ask=107.0),
+        _tick("2026-01-01T00:03:00Z", 7),
+        _tick("2026-01-01T00:04:00Z", 8),
+        _tick("2026-01-01T00:05:00Z", 9),
+    ]
+    summary, strategy_calls, tick_calls, decision_sets = _run(
+        execution,
+        warmup_ticks=warmup,
+        replay=_replay(
+            history_limits={"1min": 16, "3min": 8, "5min": 4},
+            start=start,
+            end=_ts("2026-01-01T00:05:01Z"),
+        ),
+        aggregators={"1min": aggregator, "5min": five_minute_aggregator},
+    )
+
+    first_bar = decision_sets[0].replay_group.bars_by_timeframe["1min"][0]
+    five_minute_bar = decision_sets[-1].replay_group.bars_by_timeframe["5min"][0]
+    assert aggregator.received_timestamps == [
+        tick.timestamp for tick in warmup + execution
+    ]
+    assert five_minute_aggregator.received_timestamps == [
+        tick.timestamp for tick in warmup + execution
+    ]
+    assert tick_calls == execution
+    assert summary.ticks_processed == 6
+    assert strategy_calls[0][0] == _ts("2026-01-01T00:02:00Z")
+    assert all(timestamp >= start for timestamp, *_ in strategy_calls)
+    assert [item.available_at for item in decision_sets] == [
+        _ts("2026-01-01T00:02:00Z"),
+        _ts("2026-01-01T00:03:00Z"),
+        _ts("2026-01-01T00:04:00Z"),
+        _ts("2026-01-01T00:05:00Z"),
+    ]
+    assert first_bar.timestamp == _ts("2026-01-01T00:01:00Z")
+    assert first_bar.open == 102.0
+    assert first_bar.high == 108.0
+    assert first_bar.low == 102.0
+    assert first_bar.close == 105.0
+    assert first_bar.available_at == _ts("2026-01-01T00:02:00Z")
+    assert first_bar.historical_complete is True
+    assert five_minute_bar.timestamp == _ts("2026-01-01T00:00:00Z")
+    assert five_minute_bar.open == 100.0
+    assert five_minute_bar.high == 108.0
+    assert five_minute_bar.low == 100.0
+    assert five_minute_bar.close == 100.0
+    assert five_minute_bar.available_at == _ts("2026-01-01T00:05:00Z")
+    assert five_minute_bar.historical_complete is True
+
+
+def test_warmup_rejects_ticks_at_or_after_replay_start():
+    start = _ts("2026-01-01T00:01:00Z")
+    for warmup_timestamp in (
+        start,
+        start + pd.Timedelta(nanoseconds=1),
+    ):
+        with pytest.raises(ValueError, match="must precede replay start"):
+            _run(
+                [_tick("2026-01-01T00:02:00Z", 1)],
+                warmup_ticks=[_tick(warmup_timestamp.isoformat(), 0)],
+                replay=_replay(start=start),
+            )
+
+
+def test_warmup_requires_a_configured_replay_start():
+    with pytest.raises(ValueError, match="require a configured replay start"):
+        _run(
+            [],
+            warmup_ticks=[_tick("2026-01-01T00:00:00Z", 0)],
+            replay=_replay(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("warmup", "message"),
+    [
+        (
+            [
+                _tick("2026-01-01T00:00:30Z", 0),
+                _tick("2026-01-01T00:00:00Z", 1),
+            ],
+            "non-decreasing",
+        ),
+        (
+            [
+                _tick("2026-01-01T00:00:00Z", 1),
+                _tick("2026-01-01T00:00:30Z", 0),
+            ],
+            "source_order must be strictly increasing",
+        ),
+    ],
+)
+def test_warmup_uses_existing_timestamp_and_source_order_validation(warmup, message):
+    with pytest.raises(ValueError, match=message):
+        _run(
+            [_tick("2026-01-01T00:02:00Z", 2)],
+            warmup_ticks=warmup,
+            replay=_replay(start=_ts("2026-01-01T00:01:00Z")),
+        )
+
+
+def test_warmup_preserves_completed_history_and_actual_availability():
+    start = _ts("2026-01-01T00:03:30Z")
+    availability = _ts("2026-01-01T00:04:30Z")
+    observed = []
+
+    def strategy(timestamp, visible_base, visible_context):
+        observed.append((timestamp, visible_context.frames["3min"].copy()))
+        return _decision(visible_context.replay_subject)
+
+    _, _, tick_calls, _ = _run(
+        [
+            _tick("2026-01-01T00:03:30Z", 4),
+            _tick("2026-01-01T00:04:00Z", 5),
+            _tick("2026-01-01T00:04:30Z", 6),
+            _tick("2026-01-01T00:05:00Z", 7),
+        ],
+        warmup_ticks=[
+            _tick("2026-01-01T00:00:00Z", 0),
+            _tick("2026-01-01T00:01:00Z", 1),
+            _tick("2026-01-01T00:02:00Z", 2),
+            _tick("2026-01-01T00:03:00Z", 3),
+        ],
+        replay=_replay(start=start, end=_ts("2026-01-01T00:06:00Z")),
+        aggregators={
+            "1min": TickAggregator("1min"),
+            "3min": _DelayedEmissionAggregator(
+                "3min",
+                "2026-01-01T00:04:30Z",
+            ),
+        },
+        strategy_callback=strategy,
+    )
+
+    prior_rows_at_each_decision = [
+        frame.loc[frame.index == _ts("2026-01-01T00:00:00Z")]
+        for _, frame in observed
+    ]
+    assert tick_calls == [
+        _tick("2026-01-01T00:03:30Z", 4),
+        _tick("2026-01-01T00:04:00Z", 5),
+        _tick("2026-01-01T00:04:30Z", 6),
+        _tick("2026-01-01T00:05:00Z", 7),
+    ]
+    assert all(timestamp >= start for timestamp, _ in observed)
+    before_availability = [
+        rows
+        for (timestamp, _), rows in zip(observed, prior_rows_at_each_decision)
+        if timestamp < availability
+    ]
+    assert before_availability
+    assert all(rows.empty for rows in before_availability)
+    at_or_after_availability = [
+        row
+        for (timestamp, _), rows in zip(observed, prior_rows_at_each_decision)
+        if timestamp >= availability
+        for _, row in rows.iterrows()
+    ]
+    assert at_or_after_availability
+    assert all(row["available_at"] == availability for row in at_or_after_availability)
+    assert all(row["historical_complete"] for row in at_or_after_availability)
 
 
 def test_one_tick_groups_completed_bars_across_configured_timeframes():

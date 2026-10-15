@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import chain
 from typing import Callable, Iterable, Mapping
 
 import pandas as pd
@@ -24,6 +25,7 @@ StrategyCallback = Callable[
     DecisionRecord,
 ]
 ExecutionTickCallback = Callable[[QuoteEvent], None]
+WarmupTickCallback = Callable[[QuoteEvent], None]
 DecisionSetCallback = Callable[["TickExecutionDecisionSet"], None]
 
 
@@ -70,8 +72,10 @@ class TickExecutionReplay:
     """Causal orchestration seam from canonical ticks to complete decision sets.
 
     The execution-tick callback runs before aggregation and strategy evaluation
-    for each quote. The decision-set callback receives all decisions produced
-    by one availability group only after every subject in that group is drained.
+    for each execution-eligible quote. Warm-up quotes seed aggregation and
+    replay history but never trigger strategy or execution callbacks. The
+    decision-set callback receives all decisions produced by one availability
+    group only after every subject in that group is drained.
     """
 
     def __init__(
@@ -82,6 +86,7 @@ class TickExecutionReplay:
         strategy_callback: StrategyCallback,
         on_tick: ExecutionTickCallback,
         on_decision_set: DecisionSetCallback,
+        on_warmup_tick: WarmupTickCallback | None = None,
     ) -> None:
         if not aggregators:
             raise ValueError("At least one TickAggregator is required.")
@@ -96,16 +101,29 @@ class TickExecutionReplay:
                 raise ValueError(f"Replay history is not configured for {timeframe}.")
         if not callable(strategy_callback) or not callable(on_tick) or not callable(on_decision_set):
             raise TypeError("Strategy, execution-tick, and decision-set callbacks must be callable.")
+        if on_warmup_tick is not None and not callable(on_warmup_tick):
+            raise TypeError("Warm-up tick callback must be callable or None.")
 
         self.aggregators = dict(aggregators)
         self.replay = replay
         self.strategy_callback = strategy_callback
         self.on_tick = on_tick
         self.on_decision_set = on_decision_set
+        self.on_warmup_tick = on_warmup_tick
         self._has_run = False
         self._last_decision: DecisionRecord | None = None
 
-    def run(self, ticks: Iterable[QuoteEvent]) -> TickExecutionReplaySummary:
+    def run(
+        self,
+        ticks: Iterable[QuoteEvent],
+        *,
+        warmup_ticks: Iterable[QuoteEvent] = (),
+    ) -> TickExecutionReplaySummary:
+        """Seed aggregators from pre-start ticks without routing them to execution.
+
+        Warm-up ticks are consumed before ``ticks``, must precede replay start,
+        and never reach ``on_tick`` or ``on_decision_set``.
+        """
         if self._has_run:
             raise RuntimeError("A TickExecutionReplay instance can run only once.")
         self._has_run = True
@@ -127,7 +145,11 @@ class TickExecutionReplay:
             else _as_utc(self.replay.config.end, "replay end")
         )
 
-        for tick in ticks:
+        tick_stream = chain(
+            ((True, tick) for tick in warmup_ticks),
+            ((False, tick) for tick in ticks),
+        )
+        for is_warmup, tick in tick_stream:
             if not isinstance(tick, QuoteEvent):
                 raise TypeError("ticks must contain QuoteEvent values.")
             if previous_timestamp is not None and tick.timestamp < previous_timestamp:
@@ -136,13 +158,20 @@ class TickExecutionReplay:
                 raise ValueError("Tick source_order must be strictly increasing.")
             previous_timestamp = tick.timestamp
             previous_source_order = tick.source_order
-            if start is not None and tick.timestamp < start:
-                continue
-            if end is not None and tick.timestamp >= end:
-                continue
-            ticks_processed += 1
-
-            self.on_tick(tick)
+            if is_warmup:
+                if start is None:
+                    raise ValueError("Warm-up ticks require a configured replay start.")
+                if tick.timestamp >= start:
+                    raise ValueError("Warm-up tick timestamps must precede replay start.")
+                if self.on_warmup_tick is not None:
+                    self.on_warmup_tick(tick)
+            else:
+                if start is not None and tick.timestamp < start:
+                    continue
+                if end is not None and tick.timestamp >= end:
+                    continue
+                ticks_processed += 1
+                self.on_tick(tick)
 
             emitted_by_timeframe: dict[str, tuple[IncrementalReplayBar, ...]] = {}
             for timeframe, aggregator in self.aggregators.items():
@@ -170,12 +199,17 @@ class TickExecutionReplay:
                 observation = self.replay.process_next(self._evaluate_subject)
                 if observation is None:
                     break
+                if is_warmup:
+                    raise RuntimeError("Warm-up ticks cannot trigger replay decisions.")
                 subjects_processed += 1
                 decision = self._last_decision
                 if decision is None:
                     raise RuntimeError("Strategy callback completed without producing a decision.")
                 decisions.append(decision)
                 self._last_decision = None
+
+            if is_warmup:
+                continue
 
             decision_set = TickExecutionDecisionSet(
                 available_at=tick.timestamp,

@@ -159,15 +159,21 @@ class CoreV1TickExecution:
             replay=replay,
             strategy_callback=self._evaluate_subject,
             on_tick=self._process_tick,
+            on_warmup_tick=self._record_tick_provenance,
             on_decision_set=self._submit_decision_set,
         )
         self.replay = replay
 
-    def run(self, ticks: Iterable[QuoteEvent]) -> CoreV1TickExecutionReport:
+    def run(
+        self,
+        ticks: Iterable[QuoteEvent],
+        *,
+        warmup_ticks: Iterable[QuoteEvent] = (),
+    ) -> CoreV1TickExecutionReport:
         if self._has_run:
             raise RuntimeError("CoreV1TickExecution instances may run only once.")
         self._has_run = True
-        summary = self._runner.run(ticks)
+        summary = self._runner.run(ticks, warmup_ticks=warmup_ticks)
         execution_results = self.execution.finish()
         return CoreV1TickExecutionReport(
             replay_summary=summary,
@@ -187,6 +193,9 @@ class CoreV1TickExecution:
         # Existing pending intents and positions must observe the quote first.
         self.execution.process_tick(tick)
         self._last_tick = tick
+        self._record_tick_provenance(tick)
+
+    def _record_tick_provenance(self, tick: QuoteEvent) -> None:
         for timeframe, buckets in self._ticks_by_interval.items():
             start = tick.timestamp.floor(timeframe)
             buckets[start].append(tick)
