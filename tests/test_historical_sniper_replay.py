@@ -62,4 +62,4 @@ def test_replay_respects_start_end_window():
             end=data.index[7],
         ),
     ).run()
-    assert [x.timestamp for x in result.observations] == list(data.index[3:8])
+    assert [x.timestamp for x in result.observations] == list(data.index[3:7])

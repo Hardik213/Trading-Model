@@ -11,7 +11,12 @@ from src.replay_engine import (
     assert_no_future_data,
 )
 from src.tick_aggregation import TickAggregator
-from src.timeframe_context import TimeframeContext, bars_available_as_of, build_context
+from src.timeframe_context import (
+    TimeframeContext,
+    bars_available_as_of,
+    build_context,
+    eligible_decision_times,
+)
 
 
 def frame(start="2026-01-01T10:00:00Z", n=6):
@@ -494,6 +499,66 @@ def test_nominal_close_decisions_skip_incomplete_rows():
         (pd.Timestamp("2026-01-01T10:05:00Z"),(base.index[0],)),
         (pd.Timestamp("2026-01-01T10:10:00Z"),(base.index[0],base.index[1])),
     ]
+
+
+def test_eligible_decision_times_excludes_end_boundary():
+    start = pd.Timestamp("2026-01-01T10:00:00Z")
+    end = pd.Timestamp("2026-01-01T10:10:00Z")
+    just_before_end = end - pd.Timedelta(nanoseconds=1)
+    frame = pd.DataFrame(
+        {
+            "available_at": [start, just_before_end, end],
+            "historical_complete": [True, True, True],
+            "is_complete": [True, True, True],
+        }
+    )
+
+    assert eligible_decision_times(
+        frame,
+        timeframe="5M",
+        start=start,
+        end=end,
+    ).tolist() == [start, just_before_end]
+
+
+def test_adjacent_replay_windows_process_shared_boundary_once():
+    data = frame(start="2026-01-01T10:00:00Z", n=3)
+    data.attrs["bar_label"] = "right"
+    shared_boundary = data.index[1]
+    next_end = data.index[2] + pd.Timedelta(minutes=5)
+    context = TimeframeContext(frames={})
+
+    first = HistoricalReplay(
+        data,
+        context=context,
+        config=ReplayConfig(
+            timeframe="5M",
+            source="TEST",
+            start=data.index[0],
+            end=shared_boundary,
+        ),
+    )
+    second = HistoricalReplay(
+        data,
+        context=context,
+        config=ReplayConfig(
+            timeframe="5M",
+            source="TEST",
+            start=shared_boundary,
+            end=next_end,
+        ),
+    )
+
+    def observe(timestamp, visible, visible_context):
+        return ReplayObservation(timestamp, ReplayDecision.DEVELOPING, "DEVELOPING", "test")
+
+    first_times = [item.timestamp for item in first.run(observe)]
+    second_times = [item.timestamp for item in second.run(observe)]
+    combined_times = first_times + second_times
+
+    assert first_times == [data.index[0]]
+    assert second_times == [data.index[1], data.index[2]]
+    assert combined_times.count(shared_boundary) == 1
 
 
 def test_build_context_propagates_delayed_and_incomplete_event_times():

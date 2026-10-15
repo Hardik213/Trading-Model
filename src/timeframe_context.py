@@ -92,7 +92,7 @@ def eligible_decision_times(
     if start is not None:
         timestamps = timestamps[timestamps >= start]
     if end is not None:
-        timestamps = timestamps[timestamps <= end]
+        timestamps = timestamps[timestamps < end]
     return timestamps
 
 
