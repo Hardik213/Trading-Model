@@ -56,14 +56,31 @@ def _tick(timestamp: str, order: int, bid: float = 100.0, ask: float = 101.0) ->
 def _replay(
     *,
     history_limits: dict[str, int] | None = None,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
 ) -> IncrementalHistoricalReplay:
     limits = history_limits or {"1min": 16, "3min": 8}
     return IncrementalHistoricalReplay(
-        config=ReplayConfig(timeframe="1min", source="TEST"),
+        config=ReplayConfig(
+            timeframe="1min",
+            source="TEST",
+            start=start,
+            end=end,
+        ),
         history_limits=limits,
         max_pending_groups=1,
         max_pending_bars=32,
     )
+
+
+class _TrackingTickAggregator(TickAggregator):
+    def __init__(self, interval: str) -> None:
+        super().__init__(interval)
+        self.received_timestamps = []
+
+    def add_tick(self, ts, bid, ask):
+        self.received_timestamps.append(pd.Timestamp(ts).tz_convert("UTC"))
+        return super().add_tick(ts, bid, ask)
 
 
 def _decision(subject: ReplaySubject, *, quantity: float | None = 1.0) -> DecisionRecord:
@@ -138,6 +155,55 @@ def test_one_emission_tick_forms_one_availability_group():
     assert len(decision_sets) == 1
     assert decision_sets[0].available_at == _ts("2026-01-01T00:01:00Z")
     assert len(decision_sets[0].replay_group.bars_by_timeframe["1min"]) == 1
+
+
+def test_raw_ticks_are_clipped_to_half_open_replay_window():
+    start = _ts("2026-01-01T00:00:30Z")
+    end = _ts("2026-01-01T00:02:00Z")
+    just_before_end = end - pd.Timedelta(nanoseconds=1)
+    aggregator = _TrackingTickAggregator("1min")
+    summary, _, tick_calls, _ = _run(
+        [
+            _tick("2026-01-01T00:00:29.999999999Z", 0),
+            _tick(start.isoformat(), 1),
+            _tick(just_before_end.isoformat(), 2),
+            _tick(end.isoformat(), 3),
+        ],
+        replay=_replay(start=start, end=end),
+        aggregators={"1min": aggregator},
+    )
+
+    expected = [start, just_before_end]
+    assert [tick.timestamp for tick in tick_calls] == expected
+    assert aggregator.received_timestamps == expected
+    assert summary.ticks_processed == 2
+
+
+def test_shared_window_boundary_is_excluded_then_included_once():
+    boundary = _ts("2026-01-01T00:01:00Z")
+    raw_ticks = [_tick(boundary.isoformat(), 0)]
+    first_aggregator = _TrackingTickAggregator("1min")
+    second_aggregator = _TrackingTickAggregator("1min")
+
+    first_summary, _, first_tick_calls, _ = _run(
+        raw_ticks,
+        replay=_replay(start=boundary - pd.Timedelta(minutes=1), end=boundary),
+        aggregators={"1min": first_aggregator},
+    )
+    second_summary, _, second_tick_calls, _ = _run(
+        raw_ticks,
+        replay=_replay(start=boundary, end=boundary + pd.Timedelta(minutes=1)),
+        aggregators={"1min": second_aggregator},
+    )
+
+    processed = [tick.timestamp for tick in first_tick_calls + second_tick_calls]
+    assert first_summary.ticks_processed == 0
+    assert first_tick_calls == []
+    assert first_aggregator.received_timestamps == []
+    assert second_summary.ticks_processed == 1
+    assert [tick.timestamp for tick in second_tick_calls] == [boundary]
+    assert second_aggregator.received_timestamps == [boundary]
+    assert processed == [boundary]
 
 
 def test_one_tick_groups_completed_bars_across_configured_timeframes():

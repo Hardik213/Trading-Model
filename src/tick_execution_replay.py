@@ -116,6 +116,16 @@ class TickExecutionReplay:
         decision_sets_submitted = 0
         previous_timestamp: pd.Timestamp | None = None
         previous_source_order: int | None = None
+        start = (
+            None
+            if self.replay.config.start is None
+            else _as_utc(self.replay.config.start, "replay start")
+        )
+        end = (
+            None
+            if self.replay.config.end is None
+            else _as_utc(self.replay.config.end, "replay end")
+        )
 
         for tick in ticks:
             if not isinstance(tick, QuoteEvent):
@@ -126,6 +136,10 @@ class TickExecutionReplay:
                 raise ValueError("Tick source_order must be strictly increasing.")
             previous_timestamp = tick.timestamp
             previous_source_order = tick.source_order
+            if start is not None and tick.timestamp < start:
+                continue
+            if end is not None and tick.timestamp >= end:
+                continue
             ticks_processed += 1
 
             self.on_tick(tick)
