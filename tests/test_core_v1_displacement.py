@@ -151,6 +151,50 @@ def visible_swing_assessment_inputs() -> SubjectVisibleInputs:
     )
 
 
+def swept_displacement_inputs(bar_count: int = 30) -> SubjectVisibleInputs:
+    bars = [(100.0, 101.0, 99.0, 100.0) for _ in range(bar_count)]
+    bars[3] = (100.0, 110.0, 99.0, 100.0)
+    bars[8] = (100.0, 111.0, 99.0, 100.0)
+    bars[9] = (100.0, 101.0, 99.0, 100.0)
+    bars[28] = (100.0, 100.5, 94.0, 95.5)
+    if bar_count > 29:
+        bars[29] = (95.5, 96.0, 93.0, 94.0)
+    if bar_count > 53:
+        bars[53] = (100.0, 100.5, 94.0, 95.5)
+    if bar_count > 54:
+        bars[54] = (95.5, 96.0, 93.0, 94.0)
+
+    observations = []
+    start = ts("2026-01-01T10:00:00Z")
+    for index, bar in enumerate(bars):
+        timestamp = start + pd.Timedelta(minutes=index)
+        item = source(
+            f"visible-bar-{index}",
+            timestamp.isoformat(),
+            (timestamp + pd.Timedelta(seconds=1)).isoformat(),
+        )
+        observations.append(
+            visible_observation(
+                item,
+                value={
+                    **dict(zip(("open", "high", "low", "close"), bar)),
+                    "source_id": item.source_id,
+                },
+            )
+        )
+    last = observations[-1].timing.source_observations[0]
+    subject = ReplaySubject(
+        availability_timestamp=last.availability_timestamp,
+        base_bar_timestamp=last.event_timestamp,
+    )
+    return SubjectVisibleInputs(
+        subject=subject,
+        availability_timestamp=subject.availability_timestamp,
+        base_observations=tuple(observations),
+        context_observations=(),
+    )
+
+
 def governed_observation(
     inputs: SubjectVisibleInputs,
     *,
@@ -447,6 +491,118 @@ def test_liquidity_context_is_optional_and_not_a_displacement_trigger():
         liquidity_context=(assessment,),
     )
     assert resolver.received is inputs
+    assert result.status is DisplacementStatus.UNRESOLVED
+
+
+def test_visible_price_action_derives_displacement_after_confirmed_sweep():
+    inputs = swept_displacement_inputs()
+    sweeps = tuple(
+        assessment
+        for assessment in evaluate_core_v1_liquidity(
+            inputs,
+            levels=detect_core_v1_liquidity_levels(inputs),
+        )
+        if assessment.sweep is SweepKind.SWEEP
+    )
+    assert len(sweeps) == 1
+
+    result = evaluate_core_v1_displacement(inputs, liquidity_context=sweeps)
+
+    assert result.status is DisplacementStatus.DISPLACEMENT
+    assert result.direction is Direction.BEARISH
+    assert result.event_timestamp == ts("2026-01-01T10:28:00Z")
+    assert result.confirmation_timestamp == ts("2026-01-01T10:29:00Z")
+    assert result.event_timestamp > sweeps[0].sweep_timing.confirmation_timestamp
+
+
+def test_latest_confirmed_candidate_is_selected_as_of_subject_cutoff():
+    earlier_cutoff = swept_displacement_inputs(bar_count=54)
+    earlier_sweeps = tuple(
+        assessment
+        for assessment in evaluate_core_v1_liquidity(
+            earlier_cutoff,
+            levels=detect_core_v1_liquidity_levels(earlier_cutoff),
+        )
+        if assessment.sweep is SweepKind.SWEEP
+    )
+    earlier_result = evaluate_core_v1_displacement(
+        earlier_cutoff,
+        liquidity_context=earlier_sweeps,
+    )
+
+    later_cutoff = swept_displacement_inputs(bar_count=55)
+    later_sweeps = tuple(
+        assessment
+        for assessment in evaluate_core_v1_liquidity(
+            later_cutoff,
+            levels=detect_core_v1_liquidity_levels(later_cutoff),
+        )
+        if assessment.sweep is SweepKind.SWEEP
+    )
+    later_result = evaluate_core_v1_displacement(
+        later_cutoff,
+        liquidity_context=later_sweeps,
+    )
+
+    assert earlier_cutoff.subject.base_bar_timestamp == ts("2026-01-01T10:53:00Z")
+    assert earlier_result.status is DisplacementStatus.DISPLACEMENT
+    assert earlier_result.event_timestamp == ts("2026-01-01T10:28:00Z")
+    assert earlier_result.confirmation_timestamp == ts("2026-01-01T10:29:00Z")
+    assert later_cutoff.subject.base_bar_timestamp == ts("2026-01-01T10:54:00Z")
+    assert later_result.status is DisplacementStatus.DISPLACEMENT
+    assert later_result.event_timestamp == ts("2026-01-01T10:53:00Z")
+    assert later_result.confirmation_timestamp == ts("2026-01-01T10:54:00Z")
+
+
+def test_future_follow_through_does_not_confirm_earlier_subject():
+    earlier_inputs = swept_displacement_inputs(bar_count=29)
+    earlier_sweeps = tuple(
+        assessment
+        for assessment in evaluate_core_v1_liquidity(
+            earlier_inputs,
+            levels=detect_core_v1_liquidity_levels(earlier_inputs),
+        )
+        if assessment.sweep is SweepKind.SWEEP
+    )
+    earlier = evaluate_core_v1_displacement(
+        earlier_inputs,
+        liquidity_context=earlier_sweeps,
+    )
+    later_inputs = swept_displacement_inputs()
+    later_sweeps = tuple(
+        assessment
+        for assessment in evaluate_core_v1_liquidity(
+            later_inputs,
+            levels=detect_core_v1_liquidity_levels(later_inputs),
+        )
+        if assessment.sweep is SweepKind.SWEEP
+    )
+    later = evaluate_core_v1_displacement(
+        later_inputs,
+        liquidity_context=later_sweeps,
+    )
+
+    assert earlier.status is DisplacementStatus.UNRESOLVED
+    assert later.status is DisplacementStatus.DISPLACEMENT
+    assert earlier_inputs.subject.base_bar_timestamp < later.confirmation_timestamp
+
+
+def test_ambiguous_sweep_context_does_not_select_displacement():
+    inputs = swept_displacement_inputs()
+    (sweep,) = tuple(
+        assessment
+        for assessment in evaluate_core_v1_liquidity(
+            inputs,
+            levels=detect_core_v1_liquidity_levels(inputs),
+        )
+        if assessment.sweep is SweepKind.SWEEP
+    )
+
+    result = evaluate_core_v1_displacement(
+        inputs,
+        liquidity_context=(sweep, sweep),
+    )
+
     assert result.status is DisplacementStatus.UNRESOLVED
 
 

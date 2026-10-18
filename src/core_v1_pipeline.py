@@ -10,6 +10,7 @@ from .core_v1_dealing_range import (
 from .core_v1_displacement import (
     CoreV1DisplacementAssessment,
     DisplacementStatus,
+    evaluate_core_v1_displacement,
 )
 from .core_v1_evidence import SubjectVisibleInputs
 from .core_v1_hypothesis import (
@@ -462,7 +463,12 @@ def evaluate_core_v1_pipeline(
         )
     _validate_visible_component(inputs, _liquidity_sources(liquidity), "Liquidity")
 
-    if displacement is None or displacement.status is not DisplacementStatus.DISPLACEMENT:
+    if displacement is None:
+        displacement = evaluate_core_v1_displacement(
+            inputs,
+            liquidity_context=(liquidity,),
+        )
+    if displacement.status is not DisplacementStatus.DISPLACEMENT:
         return _incomplete(
             inputs,
             context,

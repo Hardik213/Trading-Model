@@ -18,6 +18,7 @@ from src.core_v1_liquidity import (
 from src.core_v1_mss import evaluate_core_v1_mss
 from src.core_v1_pipeline import CoreV1PipelineResult
 from src.core_v1_pipeline import evaluate_core_v1_pipeline
+from src.core_v1_displacement import DisplacementStatus
 import src.core_v1_tick_execution as tick_execution_module
 from src.core_v1_tick_execution import CoreV1TickExecution
 from src.displacement import Direction
@@ -36,6 +37,7 @@ from src.tick_execution import (
     QuoteEvent,
 )
 from tests.test_core_v1_pipeline import pipeline_fixture
+from tests.test_core_v1_displacement import swept_displacement_inputs
 from tests.test_core_v1_retracement import FixedEntryResolver
 
 
@@ -291,6 +293,48 @@ def test_public_default_path_derives_visible_liquidity_without_supplied_evidence
     )
     assert all(
         item.pipeline_result.state is PrecisionState.DEVELOPING
+        for item in report.subject_executions
+    )
+
+
+def test_public_default_path_derives_displacement_without_custom_builder():
+    inputs = swept_displacement_inputs()
+    ticks = []
+    source_order = 0
+    for observation in inputs.base_observations:
+        timestamp = observation.timing.event_timestamp
+        prices = tuple(
+            float(observation.value[name])
+            for name in ("open", "high", "low", "close")
+        )
+        for second, price in zip((5, 15, 30, 45), prices):
+            ticks.append(
+                tick(
+                    (timestamp + pd.Timedelta(seconds=second)).isoformat(),
+                    source_order,
+                    bid=price - 0.25,
+                    ask=price + 0.25,
+                )
+            )
+            source_order += 1
+    ticks.append(
+        tick("2026-01-01T10:30:05Z", source_order, bid=94.0, ask=94.5)
+    )
+
+    instance = integration()
+    report = instance.run(ticks)
+
+    assert instance.pipeline_builder is None
+    derived = tuple(
+        item.pipeline_result
+        for item in report.subject_executions
+        if item.pipeline_result.displacement is not None
+        and item.pipeline_result.displacement.status is DisplacementStatus.DISPLACEMENT
+    )
+    assert derived
+    assert all(
+        item.pipeline_builder_identity
+        == "src.core_v1_pipeline.evaluate_core_v1_pipeline"
         for item in report.subject_executions
     )
 

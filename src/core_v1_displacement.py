@@ -11,11 +11,13 @@ import pandas as pd
 from .core_v1_evidence import SubjectVisibleInputs
 from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
+    LiquidityEventDirection,
     ReactionKind,
+    SweepKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
-from .displacement import Direction
+from .displacement import Direction, detect_displacement, is_confirmed_as_of
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from .replay_subject import ReplaySubject, same_subject_id
 
@@ -133,6 +135,146 @@ class DisplacementResolver(Protocol):
     ) -> CoreV1DisplacementObservation | None: ...
 
 
+def _derive_visible_displacement(
+    inputs: SubjectVisibleInputs,
+    liquidity_context: tuple[CoreV1LiquidityAssessment, ...],
+) -> CoreV1DisplacementObservation | None:
+    """Apply the existing OHLC displacement definition to a unique visible sweep."""
+    sweeps = tuple(
+        item
+        for item in liquidity_context
+        if item.sweep is SweepKind.SWEEP
+        and item.reaction is not None
+        and item.reaction.kind is ReactionKind.REJECTION
+        and item.sweep_timing is not None
+    )
+    if len(sweeps) != 1:
+        return None
+
+    liquidity = sweeps[0]
+    event_direction = liquidity.event_direction
+    if event_direction is LiquidityEventDirection.BULLISH:
+        direction = Direction.BULLISH
+    elif event_direction is LiquidityEventDirection.BEARISH:
+        direction = Direction.BEARISH
+    else:
+        return None
+
+    bars: list[dict[str, float]] = []
+    sources: list[EvidenceSourceObservation] = []
+    for visible in inputs.base_observations:
+        if not isinstance(visible.value, Mapping):
+            return None
+        if len(visible.timing.source_observations) != 1:
+            return None
+        source = visible.timing.source_observations[0]
+        if (
+            not source.is_base_timeframe
+            or source.event_timestamp != visible.timing.event_timestamp
+            or source.base_bar_timestamp != visible.timing.event_timestamp
+        ):
+            return None
+        values = {str(key).lower(): value for key, value in visible.value.items()}
+        if not {"open", "high", "low", "close"}.issubset(values):
+            return None
+        try:
+            bar = {
+                name: float(values[name])
+                for name in ("open", "high", "low", "close")
+            }
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(not isfinite(value) for value in bar.values()):
+            return None
+        if (
+            bar["high"] < max(bar["open"], bar["close"], bar["low"])
+            or bar["low"] > min(bar["open"], bar["close"], bar["high"])
+        ):
+            return None
+        bars.append(bar)
+        sources.append(source)
+
+    timestamps = [source.event_timestamp for source in sources]
+    if len(timestamps) < 3 or any(
+        right <= left for left, right in zip(timestamps, timestamps[1:])
+    ):
+        return None
+
+    frame = pd.DataFrame(
+        bars,
+        index=pd.DatetimeIndex(timestamps, name="timestamp"),
+    )
+    frame.columns = [column.title() for column in frame.columns]
+    reaction_confirmation = liquidity.sweep_timing.confirmation_timestamp
+    if reaction_confirmation is None:
+        return None
+
+    candidates: list[tuple[object, int, int]] = []
+    for position, timestamp in enumerate(frame.index):
+        if timestamp <= reaction_confirmation:
+            continue
+        event = detect_displacement(frame, position, direction)
+        if not is_confirmed_as_of(event, inputs.subject.base_bar_timestamp):
+            continue
+        try:
+            confirmation_position = int(frame.index.get_loc(event.confirmation_timestamp))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if confirmation_position <= position:
+            continue
+        candidates.append((event, position, confirmation_position))
+
+    if not candidates:
+        return None
+
+    event, position, confirmation_position = max(
+        candidates,
+        key=lambda candidate: (
+            candidate[0].confirmation_timestamp,
+            candidate[0].timestamp,
+        ),
+    )
+    detector_sources = sources[
+        max(0, position - 20) : confirmation_position + 1
+    ]
+    combined_sources: dict[str, EvidenceSourceObservation] = {}
+    for source in (
+        *liquidity.sweep_timing.source_observations,
+        *detector_sources,
+    ):
+        previous = combined_sources.get(source.source_id)
+        if previous is not None and previous != source:
+            return None
+        combined_sources[source.source_id] = source
+    provenance_sources = tuple(
+        sorted(
+            combined_sources.values(),
+            key=lambda source: source.event_timestamp,
+        )
+    )
+    timing = EvidenceTiming.from_inputs(
+        event_timestamp=event.timestamp,
+        confirmation_timestamp=event.confirmation_timestamp,
+        source_observations=provenance_sources,
+        provenance={
+            "resolver": "core-v1-visible-price-action",
+            "detector": "src.displacement.detect_displacement",
+            "liquidity_level_id": liquidity.level.level_id,
+        },
+        base_bar_scoped=True,
+    )
+    return CoreV1DisplacementObservation(
+        subject=inputs.subject,
+        timing=timing,
+        direction=direction,
+        attributes={
+            "body_ratio": event.body_ratio,
+            "close_location": event.close_location,
+            "range_expansion": event.range_expansion,
+        },
+    )
+
+
 def evaluate_core_v1_displacement(
     inputs: SubjectVisibleInputs,
     *,
@@ -176,6 +318,8 @@ def evaluate_core_v1_displacement(
     candidate = observation
     if candidate is None and resolver is not None:
         candidate = resolver.classify(inputs, context)
+    elif candidate is None:
+        candidate = _derive_visible_displacement(inputs, context)
     if candidate is None:
         return CoreV1DisplacementAssessment(
             subject=inputs.subject,

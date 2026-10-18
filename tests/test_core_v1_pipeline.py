@@ -33,6 +33,7 @@ from tests.test_core_v1_retracement import (
 from tests.test_core_v1_liquidity import make_inputs as make_liquidity_inputs
 from tests.test_core_v1_liquidity import priced_inputs
 from src.core_v1_displacement import DisplacementStatus
+from tests.test_core_v1_displacement import swept_displacement_inputs
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     CoreV1LiquidityLevel,
@@ -231,9 +232,26 @@ def test_pipeline_derives_visible_liquidity_and_keeps_later_stages_fail_closed()
     assert result.liquidity.sweep is SweepKind.SWEEP
     assert result.liquidity.reaction is not None
     assert result.liquidity.reaction.kind is ReactionKind.REJECTION
-    assert result.displacement is None
+    assert result.displacement is not None
+    assert result.displacement.status is DisplacementStatus.UNRESOLVED
     assert result.hypothesis is None
     assert "displacement evidence is missing" in result.reason
+
+
+def test_pipeline_derives_displacement_from_visible_price_action_by_default():
+    inputs = swept_displacement_inputs()
+
+    result = evaluate_core_v1_pipeline(inputs=inputs)
+
+    assert result.liquidity is not None
+    assert result.liquidity.sweep is SweepKind.SWEEP
+    assert result.displacement is not None
+    assert result.displacement.status is DisplacementStatus.DISPLACEMENT
+    assert result.displacement.direction.value == "BEARISH"
+    assert result.displacement.event_timestamp == ts("2026-01-01T10:28:00Z")
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.mss is None
+    assert result.hypothesis is None
 
 
 def test_automatic_liquidity_respects_the_subject_visibility_cutoff():
