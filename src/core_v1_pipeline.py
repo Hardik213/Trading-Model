@@ -40,6 +40,7 @@ from .core_v1_retracement import (
     CoreV1ZoneInteraction,
     ReactionaryZone,
     RetracementEntryResolver,
+    derive_visible_fvg_interaction,
     evaluate_core_v1_retracement,
 )
 from .evidence_timing import (
@@ -572,6 +573,8 @@ def evaluate_core_v1_pipeline(
     _validate_subject(zone, subject, "Reactionary zone")
     zone_timing = _zone_timing(zone)
     _validate_visible_component(inputs, zone_timing.source_observations, "Reactionary zone")
+    if interaction is None and isinstance(zone, CoreV1FVGObservation):
+        interaction = derive_visible_fvg_interaction(inputs, zone)
     if interaction is not None:
         _validate_subject(interaction, subject, "Zone interaction")
         if interaction.zone is not zone:

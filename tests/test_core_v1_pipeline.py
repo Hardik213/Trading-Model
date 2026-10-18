@@ -880,6 +880,8 @@ def test_pipeline_derives_fvg_candidate_but_keeps_entry_unresolved(monkeypatch):
 
     assert calls == [(kwargs["inputs"], fixture.displacement, fixture.mss, True)]
     assert result.zone is fixture.zone
+    assert result.interaction is not None
+    assert result.interaction.price is None
     assert result.retracement is not None
     assert result.retracement.planned_entry is None
     assert result.state is PrecisionState.DEVELOPING

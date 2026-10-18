@@ -215,6 +215,10 @@ class CoreV1RetracementResult:
         if self.state is PrecisionState.VALID:
             if self.planned_entry is None:
                 raise ValueError("VALID entry qualification requires a planned entry.")
+            if self.zone is None or self.interaction is None:
+                raise ValueError(
+                    "VALID entry qualification requires a reactionary zone and post-availability interaction."
+                )
             if not same_subject_id(self.planned_entry.subject, self.subject):
                 raise ValueError("Planned entry must preserve the exact ReplaySubject.")
             if (
@@ -331,6 +335,75 @@ class RetracementEntryResolver(Protocol):
     ) -> CoreV1PlannedEntry | None: ...
 
 
+def derive_visible_fvg_interaction(
+    inputs: SubjectVisibleInputs,
+    zone: CoreV1FVGObservation,
+) -> CoreV1ZoneInteraction | None:
+    """Return the first visible post-availability OHLC overlap with an FVG."""
+    if not isinstance(inputs, SubjectVisibleInputs):
+        raise TypeError("inputs must be SubjectVisibleInputs.")
+    if not isinstance(zone, CoreV1FVGObservation):
+        raise TypeError("zone must be a CoreV1FVGObservation.")
+    if not same_subject_id(zone.subject, inputs.subject):
+        raise ValueError("FVG zone belongs to another ReplaySubject.")
+    _validate_visible_sources(zone.timing.source_observations, inputs, "FVG zone")
+
+    fvg = zone.fvg
+    relevant = tuple(
+        item
+        for item in inputs.base_observations
+        if item.timing.event_timestamp > zone.timing.availability_timestamp
+    )
+    times = tuple(item.timing.event_timestamp for item in relevant)
+    if any(right <= left for left, right in zip(times, times[1:])):
+        return None
+
+    for item in relevant:
+        if not isinstance(item.value, Mapping) or len(item.timing.source_observations) != 1:
+            return None
+        source = item.timing.source_observations[0]
+        if (
+            not source.is_base_timeframe
+            or source.event_timestamp != item.timing.event_timestamp
+            or source.base_bar_timestamp != item.timing.event_timestamp
+        ):
+            return None
+        values = {str(key).lower(): value for key, value in item.value.items()}
+        if not {"open", "high", "low", "close"}.issubset(values):
+            return None
+        try:
+            open_, high, low, close = (
+                float(values[name]) for name in ("open", "high", "low", "close")
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(not isfinite(value) for value in (open_, high, low, close)):
+            return None
+        if high < max(open_, close, low) or low > min(open_, close, high):
+            return None
+        if low <= fvg.upper_bound and high >= fvg.lower_bound:
+            sources = _unique_sources(
+                (*zone.timing.source_observations, *item.timing.source_observations)
+            )
+            timing = EvidenceTiming.from_inputs(
+                event_timestamp=item.timing.event_timestamp,
+                source_observations=sources,
+                provenance={
+                    "detector": "core-v1-visible-fvg-overlap",
+                    "interaction": "ohlc-range-overlap",
+                    "exact_touch_price_inferred": False,
+                },
+                base_bar_scoped=True,
+            )
+            return CoreV1ZoneInteraction(
+                subject=inputs.subject,
+                zone=zone,
+                timing=timing,
+                price=None,
+            )
+    return None
+
+
 def evaluate_core_v1_retracement(
     inputs: SubjectVisibleInputs,
     *,
@@ -366,6 +439,11 @@ def evaluate_core_v1_retracement(
         return _unresolved(request, "Required MSS evidence is missing or unresolved.")
 
     _validate_mss_sequence(request)
+    if zone is None or interaction is None:
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: a visible reactionary zone and post-availability interaction are required.",
+        )
     if resolver is None:
         return _unresolved(
             request,
@@ -816,5 +894,6 @@ __all__ = [
     "CoreV1ZoneInteraction",
     "ReactionaryZone",
     "RetracementEntryResolver",
+    "derive_visible_fvg_interaction",
     "evaluate_core_v1_retracement",
 ]

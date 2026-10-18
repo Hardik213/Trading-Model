@@ -38,6 +38,7 @@ from src.core_v1_reactionary_zones import (
 from src.core_v1_retracement import (
     CoreV1PlannedEntry,
     CoreV1ZoneInteraction,
+    derive_visible_fvg_interaction,
     evaluate_core_v1_retracement,
 )
 from src.dealing_range import DealingRange, RangeLocation
@@ -485,7 +486,7 @@ def test_zone_touch_liquidity_or_mss_without_full_sequence_never_qualifies(overr
     assert result.planned_entry is None
 
 
-def test_missing_zone_and_interaction_can_only_qualify_through_explicit_policy():
+def test_explicit_policy_cannot_bypass_missing_zone_and_interaction():
     fixture = make_fixture()
     result = evaluate(
         fixture,
@@ -493,10 +494,10 @@ def test_missing_zone_and_interaction_can_only_qualify_through_explicit_policy()
         interaction=None,
         resolver=FixedEntryResolver(fixture.planned_entry),
     )
-    assert result.state is PrecisionState.VALID
+    assert result.state is PrecisionState.DEVELOPING
     assert result.zone is None
     assert result.interaction is None
-    assert result.planned_entry_price == fixture.planned_entry.planned_entry_price
+    assert result.planned_entry is None
 
 
 def test_zone_required_by_caller_policy_is_missing_no_entry():
@@ -866,3 +867,53 @@ def test_entry_state_uses_only_existing_four_state_vocabulary():
     assert unresolved.state in PrecisionState
     assert resolved.state in PrecisionState
     assert not hasattr(unresolved, "execution_state")
+
+
+def test_visible_fvg_interaction_is_first_post_availability_overlap():
+    fixture = make_fixture()
+
+    interaction = derive_visible_fvg_interaction(fixture.inputs, fixture.zone)
+
+    assert interaction is not None
+    assert interaction.zone is fixture.zone
+    assert interaction.interaction_timestamp == ts("2026-01-01T10:05:00Z")
+    assert interaction.price is None
+    assert fixture.zone.timing.source_observations[0] in interaction.timing.source_observations
+    assert fixture.sources["follow-through"] in interaction.timing.source_observations
+    assert interaction.timing.provenance["exact_touch_price_inferred"] is False
+
+
+def test_visible_fvg_interaction_is_unresolved_when_post_zone_bars_do_not_overlap():
+    fixture = make_fixture()
+    observations = []
+    for item in fixture.inputs.base_observations:
+        if item.timing.event_timestamp > fixture.zone.timing.availability_timestamp:
+            value = {
+                **item.value,
+                "open": 1000.0,
+                "high": 1010.0,
+                "low": 999.0,
+                "close": 1005.0,
+            }
+            item = replace(item, value=value)
+        observations.append(item)
+    inputs = replace(fixture.inputs, base_observations=tuple(observations))
+
+    assert derive_visible_fvg_interaction(inputs, fixture.zone) is None
+
+
+def test_entry_resolver_cannot_bypass_missing_visible_zone_interaction():
+    fixture = make_fixture()
+    result = evaluate_core_v1_retracement(
+        fixture.inputs,
+        mss=fixture.mss,
+        liquidity=fixture.liquidity,
+        displacement=fixture.displacement,
+        zone=fixture.zone,
+        interaction=None,
+        resolver=FixedEntryResolver(fixture.planned_entry),
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.planned_entry is None
+    assert "post-availability interaction are required" in result.reason
