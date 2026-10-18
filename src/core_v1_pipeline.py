@@ -33,6 +33,7 @@ from .core_v1_reactionary_zones import (
     CoreV1FVGObservation,
     CoreV1OrderBlockObservation,
     CoreV1PDArrayObservation,
+    evaluate_core_v1_fvg,
 )
 from .core_v1_retracement import (
     CoreV1RetracementResult,
@@ -529,27 +530,35 @@ def evaluate_core_v1_pipeline(
         )
 
     if zone is None:
-        entry = evaluate_core_v1_retracement(
+        fvg_result = evaluate_core_v1_fvg(
             inputs,
-            mss=mss,
-            liquidity=liquidity,
-            displacement=displacement,
-            context=context,
-            draw_on_liquidity=draw_on_liquidity,
-            interaction=None,
-            resolver=None,
-        )
-        return _incomplete(
-            inputs,
-            context,
-            "DEVELOPING: no governed reactionary-zone evidence is available; entry is blocked.",
-            draw_on_liquidity=draw_on_liquidity,
-            opposing_liquidity_levels=opposing_liquidity_levels,
-            liquidity=liquidity,
             displacement=displacement,
             mss=mss,
-            retracement=entry,
+            derive_visible=True,
         )
+        zone = fvg_result.observation
+        if zone is None:
+            entry = evaluate_core_v1_retracement(
+                inputs,
+                mss=mss,
+                liquidity=liquidity,
+                displacement=displacement,
+                context=context,
+                draw_on_liquidity=draw_on_liquidity,
+                interaction=None,
+                resolver=None,
+            )
+            return _incomplete(
+                inputs,
+                context,
+                "DEVELOPING: no unique displacement-linked FVG is visible; entry is blocked.",
+                draw_on_liquidity=draw_on_liquidity,
+                opposing_liquidity_levels=opposing_liquidity_levels,
+                liquidity=liquidity,
+                displacement=displacement,
+                mss=mss,
+                retracement=entry,
+            )
 
     if not isinstance(
         zone,

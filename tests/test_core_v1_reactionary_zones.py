@@ -27,6 +27,7 @@ from src.evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from src.fvg import FVG, FVGDirection
 from src.pd_arrays import PDArray, PDArrayType
 from src.replay_subject import ReplaySubject
+from tests.test_core_v1_retracement import make_fixture
 
 
 def ts(value: str) -> pd.Timestamp:
@@ -511,3 +512,69 @@ def test_resolvers_only_receive_timed_visible_inputs():
         not isinstance(item.value, (pd.DataFrame, pd.Series))
         for item in resolver.received.base_observations
     )
+
+
+def test_visible_fvg_derivation_requires_displacement_as_middle_candle():
+    fixture = make_fixture()
+    selected_times = {
+        ts("2026-01-01T10:01:30Z"),
+        ts("2026-01-01T10:02:00Z"),
+        ts("2026-01-01T10:02:30Z"),
+    }
+    selected = [
+        item
+        for item in fixture.inputs.base_observations
+        if item.timing.event_timestamp in selected_times
+    ]
+    assert len(selected) == 3
+    edited = []
+    bars = (
+        {"open": 103.0, "high": 104.0, "low": 102.0, "close": 103.0},
+        {"open": 107.0, "high": 109.0, "low": 93.0, "close": 108.0},
+        {"open": 110.0, "high": 112.0, "low": 110.0, "close": 111.0},
+    )
+    for item, bar in zip(selected, bars):
+        edited.append(replace(item, value={**bar, "source_id": item.value["source_id"]}))
+    inputs = replace(fixture.inputs, base_observations=tuple(edited))
+
+    result = evaluate_core_v1_fvg(
+        inputs,
+        displacement=fixture.displacement,
+        mss=fixture.mss,
+        derive_visible=True,
+    )
+
+    assert result.status is ZoneStatus.RESOLVED
+    assert result.observation is not None
+    assert result.observation.fvg.direction is FVGDirection.BULLISH
+    assert result.observation.fvg.first_candle_timestamp == ts("2026-01-01T10:01:30Z")
+    assert result.observation.fvg.third_candle_timestamp == ts("2026-01-01T10:02:30Z")
+    assert result.observation.fvg.lower_bound == 104.0
+    assert result.observation.fvg.upper_bound == 110.0
+    assert result.observation.timing.source_observations == tuple(
+        source_item
+        for item in edited
+        for source_item in item.timing.source_observations
+    )
+
+
+def test_visible_fvg_derivation_fails_closed_without_third_candle():
+    fixture = make_fixture()
+    inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            item
+            for item in fixture.inputs.base_observations
+            if item.timing.event_timestamp < ts("2026-01-01T10:02:30Z")
+        ),
+    )
+
+    result = evaluate_core_v1_fvg(
+        inputs,
+        displacement=fixture.displacement,
+        mss=fixture.mss,
+        derive_visible=True,
+    )
+
+    assert result.status is ZoneStatus.UNRESOLVED
+    assert result.observation is None

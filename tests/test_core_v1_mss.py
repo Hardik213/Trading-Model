@@ -920,7 +920,9 @@ def test_default_pipeline_derives_point_in_time_mss_from_visible_price_action():
         "2026-01-01T10:29:00Z"
     )
     assert result.mss.confirmation_timestamp == ts("2026-01-01T10:31:00Z")
-    assert result.zone is None
+    assert result.zone is not None
+    assert result.retracement is not None
+    assert result.retracement.planned_entry is None
     assert result.hypothesis is None
 
 

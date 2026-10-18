@@ -3,12 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from math import isclose, isfinite
-from typing import Protocol
+from typing import Mapping, Protocol
+
+import pandas as pd
 
 from .core_v1_dealing_range import DealingRangeContext, DealingRangeStatus
+from .core_v1_displacement import CoreV1DisplacementAssessment, DisplacementStatus
 from .core_v1_evidence import SubjectVisibleInputs
+from .core_v1_mss import CoreV1MSSResult, MSSStatus
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
-from .fvg import FVG, FVGDirection
+from .displacement import Direction
+from .fvg import FVG, FVGDirection, detect_fvgs
 from .pd_arrays import PDArray, PDArrayType
 from .replay_subject import ReplaySubject, same_subject_id
 
@@ -20,7 +25,7 @@ class ZoneStatus(str, Enum):
 
 @dataclass(frozen=True)
 class CoreV1FVGObservation:
-    """A caller-governed FVG contextual observation, not an FVG detector."""
+    """A timed FVG zone observation; it does not imply an entry decision."""
 
     subject: ReplaySubject
     fvg: FVG
@@ -217,12 +222,23 @@ def evaluate_core_v1_fvg(
     *,
     observation: CoreV1FVGObservation | None = None,
     resolver: FVGResolver | None = None,
+    displacement: CoreV1DisplacementAssessment | None = None,
+    mss: CoreV1MSSResult | None = None,
+    derive_visible: bool = False,
 ) -> FVGResult:
     if not isinstance(inputs, SubjectVisibleInputs):
         raise TypeError("inputs must be SubjectVisibleInputs.")
     if observation is not None and resolver is not None:
         raise ValueError("Supply an FVG observation or resolver, not both.")
-    candidate = observation or (resolver or UnavailableFVGResolver()).resolve(inputs)
+    if type(derive_visible) is not bool:
+        raise TypeError("derive_visible must be a boolean.")
+    if derive_visible and (observation is not None or resolver is not None):
+        raise ValueError("Visible FVG derivation cannot be mixed with supplied evidence.")
+    candidate = observation
+    if candidate is None and derive_visible:
+        candidate = _derive_visible_displacement_fvg(inputs, displacement, mss)
+    elif candidate is None:
+        candidate = (resolver or UnavailableFVGResolver()).resolve(inputs)
     if candidate is None:
         return FVGResult(
             inputs.subject,
@@ -242,6 +258,113 @@ def evaluate_core_v1_fvg(
         confirmation_timestamp=candidate.timing.confirmation_timestamp,
     )
     return FVGResult(inputs.subject, ZoneStatus.RESOLVED, candidate)
+
+
+
+def _derive_visible_displacement_fvg(
+    inputs: SubjectVisibleInputs,
+    displacement: CoreV1DisplacementAssessment | None,
+    mss: CoreV1MSSResult | None,
+) -> CoreV1FVGObservation | None:
+    if (
+        displacement is None
+        or displacement.status is not DisplacementStatus.DISPLACEMENT
+        or displacement.observation is None
+        or not same_subject_id(displacement.subject, inputs.subject)
+        or mss is None
+        or mss.status is not MSSStatus.MSS
+        or not same_subject_id(mss.subject, inputs.subject)
+        or mss.displacement is not displacement
+        or displacement.observation.direction not in {Direction.BULLISH, Direction.BEARISH}
+    ):
+        return None
+
+    bars: list[dict[str, float]] = []
+    sources: list[EvidenceSourceObservation] = []
+    for visible in inputs.base_observations:
+        if not isinstance(visible.value, Mapping):
+            return None
+        if len(visible.timing.source_observations) != 1:
+            return None
+        source = visible.timing.source_observations[0]
+        if (
+            not source.is_base_timeframe
+            or source.event_timestamp != visible.timing.event_timestamp
+            or source.base_bar_timestamp != visible.timing.event_timestamp
+        ):
+            return None
+        values = {str(key).lower(): value for key, value in visible.value.items()}
+        if not {"open", "high", "low", "close"}.issubset(values):
+            return None
+        try:
+            bar = {
+                name: float(values[name])
+                for name in ("open", "high", "low", "close")
+            }
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(not isfinite(value) for value in bar.values()):
+            return None
+        if (
+            bar["high"] < max(bar["open"], bar["close"], bar["low"])
+            or bar["low"] > min(bar["open"], bar["close"], bar["high"])
+        ):
+            return None
+        bars.append(bar)
+        sources.append(source)
+
+    timestamps = [source.event_timestamp for source in sources]
+    if len(timestamps) < 3 or any(
+        right <= left for left, right in zip(timestamps, timestamps[1:])
+    ):
+        return None
+    frame = pd.DataFrame(
+        bars,
+        index=pd.DatetimeIndex(timestamps, name="timestamp"),
+    )
+    frame.columns = [column.title() for column in frame.columns]
+    try:
+        found = detect_fvgs(frame)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+    expected_direction = (
+        FVGDirection.BULLISH
+        if displacement.observation.direction is Direction.BULLISH
+        else FVGDirection.BEARISH
+    )
+    displacement_timestamp = displacement.observation.timing.event_timestamp
+    candidates = []
+    for fvg in found:
+        if fvg.direction is not expected_direction:
+            continue
+        first_position = frame.index.get_loc(fvg.first_candle_timestamp)
+        if frame.index[first_position + 1] != displacement_timestamp:
+            continue
+        if fvg.confirmation_timestamp > inputs.subject.base_bar_timestamp:
+            continue
+        candidates.append((fvg, first_position))
+    if len(candidates) != 1:
+        return None
+
+    fvg, first_position = candidates[0]
+    fvg_sources = tuple(sources[first_position : first_position + 3])
+    timing = EvidenceTiming.from_inputs(
+        event_timestamp=fvg.formation_timestamp,
+        confirmation_timestamp=fvg.confirmation_timestamp,
+        source_observations=fvg_sources,
+        provenance={
+            "resolver": "core-v1-visible-fvg",
+            "detector": "src.fvg.detect_fvgs",
+            "middle_candle_is_displacement": True,
+        },
+        base_bar_scoped=True,
+    )
+    return CoreV1FVGObservation(
+        subject=inputs.subject,
+        fvg=fvg,
+        timing=timing,
+    )
 
 
 def evaluate_core_v1_pd_array(

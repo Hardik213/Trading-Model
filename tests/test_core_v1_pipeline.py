@@ -13,7 +13,11 @@ from src.core_v1_mss import (
     evaluate_core_v1_mss,
 )
 from src.core_v1_pipeline import evaluate_core_v1_pipeline
-from src.core_v1_reactionary_zones import CoreV1OrderBlockObservation
+from src.core_v1_reactionary_zones import (
+    CoreV1OrderBlockObservation,
+    FVGResult,
+    ZoneStatus,
+)
 from src.evidence_timing import EvidenceTiming
 from src.replay_subject import ReplaySubject
 from src.sniper_setup import PrecisionState
@@ -856,3 +860,27 @@ def test_supplied_foreign_liquidity_reference_is_not_accepted_by_mss():
     with pytest.raises(ValueError):
         object.__setattr__(fixture.liquidity, "subject", foreign_subject)
         evaluate(kwargs, liquidity=fixture.liquidity)
+
+
+def test_pipeline_derives_fvg_candidate_but_keeps_entry_unresolved(monkeypatch):
+    fixture, kwargs = pipeline_fixture()
+    calls = []
+
+    def derive(inputs, *, displacement, mss, derive_visible):
+        calls.append((inputs, displacement, mss, derive_visible))
+        return FVGResult(inputs.subject, ZoneStatus.RESOLVED, fixture.zone)
+
+    monkeypatch.setattr(pipeline_module, "evaluate_core_v1_fvg", derive)
+    result = evaluate(
+        kwargs,
+        zone=None,
+        interaction=None,
+        entry_resolver=None,
+    )
+
+    assert calls == [(kwargs["inputs"], fixture.displacement, fixture.mss, True)]
+    assert result.zone is fixture.zone
+    assert result.retracement is not None
+    assert result.retracement.planned_entry is None
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.hypothesis is None
