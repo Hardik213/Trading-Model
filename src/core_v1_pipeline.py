@@ -487,7 +487,14 @@ def evaluate_core_v1_pipeline(
         "Displacement",
     )
 
-    if mss is None or mss.status is not MSSStatus.MSS:
+    if mss is None:
+        mss = evaluate_core_v1_mss(
+            inputs,
+            liquidity_event=liquidity,
+            displacement=displacement,
+            derive_visible=True,
+        )
+    if mss.status is not MSSStatus.MSS:
         return _incomplete(
             inputs,
             context,
@@ -513,7 +520,7 @@ def evaluate_core_v1_pipeline(
         return _incomplete(
             inputs,
             context,
-            f"DEVELOPING: {mss.reason}",
+            f"DEVELOPING: governed MSS evidence is missing or unresolved. {mss.reason}",
             draw_on_liquidity=draw_on_liquidity,
             opposing_liquidity_levels=opposing_liquidity_levels,
             liquidity=liquidity,

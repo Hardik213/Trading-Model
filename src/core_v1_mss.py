@@ -6,6 +6,8 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
+import pandas as pd
+
 from .core_v1_displacement import (
     CoreV1DisplacementAssessment,
     DisplacementStatus,
@@ -14,12 +16,13 @@ from .core_v1_evidence import SubjectVisibleInputs
 from .core_v1_liquidity import (
     CoreV1LiquidityAssessment,
     ReactionKind,
+    SweepKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
 from .displacement import Direction
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
-from .market_structure import SwingType
+from .market_structure import LiquiditySide, SwingType, detect_confirmed_swings
 from .replay_subject import ReplaySubject, same_subject_id
 
 
@@ -242,6 +245,256 @@ class MSSFollowThroughResolver(Protocol):
     ) -> CoreV1MSSConfirmation | None: ...
 
 
+def _merge_visible_sources(
+    *groups: tuple[EvidenceSourceObservation, ...],
+) -> tuple[EvidenceSourceObservation, ...] | None:
+    merged: dict[str, EvidenceSourceObservation] = {}
+    for group in groups:
+        for source in group:
+            previous = merged.get(source.source_id)
+            if previous is not None and previous != source:
+                return None
+            merged[source.source_id] = source
+    return tuple(
+        sorted(
+            merged.values(),
+            key=lambda source: (source.event_timestamp, source.source_id),
+        )
+    )
+
+
+def _derive_visible_mss(
+    inputs: SubjectVisibleInputs,
+    liquidity_event: CoreV1LiquidityAssessment | None,
+    displacement: CoreV1DisplacementAssessment | None,
+) -> tuple[
+    CoreV1StructuralPoint,
+    CoreV1StructuralBreak,
+    CoreV1MSSConfirmation,
+] | None:
+    """Derive conservative MSS evidence from the subject's visible base prefix.
+
+    The v1 structural point is the latest strict 2-left/2-right pivot of the
+    type displacement must break, confirmed strictly before the liquidity
+    breach. A break requires a base-bar close beyond that point after the
+    displacement event. Follow-through requires a later close beyond the
+    break bar's directional extreme within two visible bars, with no intervening
+    close back through the structural point.
+    """
+    if (
+        not isinstance(liquidity_event, CoreV1LiquidityAssessment)
+        or not _liquidity_is_resolved(liquidity_event)
+        or liquidity_event.reaction is None
+        or liquidity_event.breach is None
+        or liquidity_event.reaction.kind is not ReactionKind.REJECTION
+        or liquidity_event.sweep is not SweepKind.SWEEP
+        or displacement is None
+        or displacement.status is not DisplacementStatus.DISPLACEMENT
+        or displacement.observation is None
+    ):
+        return None
+
+    direction = displacement.observation.direction
+    if direction not in {Direction.BULLISH, Direction.BEARISH}:
+        return None
+    expected_side = (
+        LiquiditySide.SSL
+        if direction is Direction.BULLISH
+        else LiquiditySide.BSL
+    )
+    if liquidity_event.level.side is not expected_side:
+        return None
+
+    bars: list[dict[str, float]] = []
+    sources: list[EvidenceSourceObservation] = []
+    for visible in inputs.base_observations:
+        if not isinstance(visible.value, Mapping):
+            return None
+        if len(visible.timing.source_observations) != 1:
+            return None
+        source = visible.timing.source_observations[0]
+        if (
+            not source.is_base_timeframe
+            or source.event_timestamp != visible.timing.event_timestamp
+            or source.base_bar_timestamp != visible.timing.event_timestamp
+        ):
+            return None
+        values = {str(key).lower(): value for key, value in visible.value.items()}
+        if not {"open", "high", "low", "close"}.issubset(values):
+            return None
+        try:
+            bar = {
+                name: float(values[name])
+                for name in ("open", "high", "low", "close")
+            }
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(not isfinite(value) for value in bar.values()):
+            return None
+        if (
+            bar["high"] < max(bar["open"], bar["close"], bar["low"])
+            or bar["low"] > min(bar["open"], bar["close"], bar["high"])
+        ):
+            return None
+        bars.append(bar)
+        sources.append(source)
+
+    timestamps = [source.event_timestamp for source in sources]
+    if len(timestamps) < 5 or any(
+        right <= left for left, right in zip(timestamps, timestamps[1:])
+    ):
+        return None
+
+    frame = pd.DataFrame(
+        bars,
+        index=pd.DatetimeIndex(timestamps, name="timestamp"),
+    )
+    frame.columns = [column.title() for column in frame.columns]
+    try:
+        swings = detect_confirmed_swings(frame, left_bars=2, right_bars=2)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+    breach_timestamp = liquidity_event.breach.timing.event_timestamp
+    target_kind = (
+        SwingType.HIGH if direction is Direction.BULLISH else SwingType.LOW
+    )
+    prior_points = tuple(
+        point
+        for point in swings
+        if point.kind is target_kind
+        and point.timestamp < breach_timestamp
+        and point.confirmation_timestamp < breach_timestamp
+        and max(
+            source.availability_timestamp
+            for source in sources[
+                max(0, point.source_index - 2) : point.source_index + 3
+            ]
+        ) < breach_timestamp
+    )
+    if not prior_points:
+        return None
+    point_swing = max(
+        prior_points,
+        key=lambda point: (point.timestamp, point.confirmation_timestamp),
+    )
+    point_sources = tuple(
+        sources[max(0, point_swing.source_index - 2) : point_swing.source_index + 3]
+    )
+    point_timing = EvidenceTiming.from_inputs(
+        event_timestamp=point_swing.timestamp,
+        confirmation_timestamp=point_swing.confirmation_timestamp,
+        source_observations=point_sources,
+        provenance={
+            "resolver": "core-v1-visible-mss",
+            "detector": "src.market_structure.detect_confirmed_swings",
+            "left_bars": 2,
+            "right_bars": 2,
+        },
+        base_bar_scoped=True,
+    )
+    point = CoreV1StructuralPoint(
+        subject=inputs.subject,
+        point_id=(
+            f"mss:{point_swing.kind.value}:{point_swing.timestamp.isoformat()}"
+        ),
+        kind=point_swing.kind,
+        price=point_swing.price,
+        timing=point_timing,
+    )
+
+    reaction_confirmation = liquidity_event.reaction.timing.confirmation_timestamp
+    displacement_timestamp = displacement.observation.timing.event_timestamp
+    if (
+        reaction_confirmation is None
+        or displacement_timestamp <= reaction_confirmation
+        or displacement_timestamp > inputs.subject.base_bar_timestamp
+    ):
+        return None
+
+    for position, timestamp in enumerate(frame.index):
+        if timestamp <= displacement_timestamp:
+            continue
+        break_close = float(frame.iloc[position]["Close"])
+        breaks_point = (
+            break_close > point.price
+            if direction is Direction.BULLISH
+            else break_close < point.price
+        )
+        if not breaks_point:
+            continue
+
+        break_sources = _merge_visible_sources(
+            point.timing.source_observations,
+            (sources[position],),
+        )
+        if break_sources is None:
+            return None
+        break_timing = EvidenceTiming.from_inputs(
+            event_timestamp=timestamp,
+            source_observations=break_sources,
+            provenance={
+                "resolver": "core-v1-visible-mss",
+                "break_rule": "base-bar-close-beyond-structural-point",
+            },
+            base_bar_scoped=True,
+        )
+        structural_break = CoreV1StructuralBreak(
+            subject=inputs.subject,
+            structural_point=point,
+            break_price=break_close,
+            timing=break_timing,
+            direction=direction,
+        )
+
+        stop = min(len(frame), position + 3)
+        invalidated = False
+        for confirmation_position in range(position + 1, stop):
+            follow_bar = frame.iloc[confirmation_position]
+            follow_close = float(follow_bar["Close"])
+            if (
+                direction is Direction.BULLISH and follow_close <= point.price
+            ) or (
+                direction is Direction.BEARISH and follow_close >= point.price
+            ):
+                invalidated = True
+                break
+            confirms = (
+                follow_close > float(frame.iloc[position]["High"])
+                if direction is Direction.BULLISH
+                else follow_close < float(frame.iloc[position]["Low"])
+            )
+            if not confirms:
+                continue
+            confirmation_sources = _merge_visible_sources(
+                break_sources,
+                tuple(sources[position + 1 : confirmation_position + 1]),
+            )
+            if confirmation_sources is None:
+                return None
+            confirmation_timing = EvidenceTiming.from_inputs(
+                event_timestamp=timestamp,
+                confirmation_timestamp=frame.index[confirmation_position],
+                source_observations=confirmation_sources,
+                provenance={
+                    "resolver": "core-v1-visible-mss",
+                    "follow_through_bars": 2,
+                    "follow_through_rule": "close-beyond-break-bar-extreme",
+                },
+                base_bar_scoped=True,
+            )
+            confirmation = CoreV1MSSConfirmation(
+                subject=inputs.subject,
+                structural_break=structural_break,
+                timing=confirmation_timing,
+            )
+            return point, structural_break, confirmation
+        if invalidated:
+            continue
+
+    return None
+
+
 def evaluate_core_v1_mss(
     inputs: SubjectVisibleInputs,
     *,
@@ -252,12 +505,36 @@ def evaluate_core_v1_mss(
     structural_break: CoreV1StructuralBreak | None = None,
     confirmation: CoreV1MSSConfirmation | None = None,
     follow_through_resolver: MSSFollowThroughResolver | None = None,
+    derive_visible: bool = False,
 ) -> CoreV1MSSResult:
-    """Gate caller-governed MSS components; unresolved prerequisites fail closed."""
+    """Gate governed MSS components; optional visible derivation fails closed."""
     if not isinstance(inputs, SubjectVisibleInputs):
         raise TypeError("inputs must be SubjectVisibleInputs.")
     if structural_point is not None and structural_point_resolver is not None:
         raise ValueError("Supply a structural point or resolver, not both.")
+    if type(derive_visible) is not bool:
+        raise TypeError("derive_visible must be a boolean.")
+    if derive_visible:
+        if any(
+            item is not None
+            for item in (
+                structural_point,
+                structural_point_resolver,
+                structural_break,
+                confirmation,
+                follow_through_resolver,
+            )
+        ):
+            raise ValueError(
+                "Visible MSS derivation cannot be mixed with supplied structure."
+            )
+        derived = _derive_visible_mss(inputs, liquidity_event, displacement)
+        if derived is None:
+            return _unresolved(
+                inputs,
+                "Visible structural point, break, or follow-through is unresolved.",
+            )
+        structural_point, structural_break, confirmation = derived
 
     point = structural_point
     if point is None and structural_point_resolver is not None:

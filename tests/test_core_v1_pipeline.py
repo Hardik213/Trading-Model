@@ -250,7 +250,8 @@ def test_pipeline_derives_displacement_from_visible_price_action_by_default():
     assert result.displacement.direction.value == "BEARISH"
     assert result.displacement.event_timestamp == ts("2026-01-01T10:28:00Z")
     assert result.state is PrecisionState.DEVELOPING
-    assert result.mss is None
+    assert result.mss is not None
+    assert result.mss.status is MSSStatus.NOT_MSS_UNRESOLVED
     assert result.hypothesis is None
 
 

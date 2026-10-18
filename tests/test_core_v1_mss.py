@@ -845,3 +845,153 @@ def test_unresolved_result_cannot_fabricate_partial_mss():
             availability_timestamp=inputs.subject.availability_timestamp,
             structural_point=values["structural_point"],
         )
+
+
+def visible_auto_mss_inputs(bar_count: int = 32) -> SubjectVisibleInputs:
+    bars = [(100.0, 101.0, 99.0, 100.0) for _ in range(bar_count)]
+    bars[3] = (100.0, 110.0, 99.0, 100.0)
+    bars[5] = (100.0, 101.0, 97.0, 100.0)
+    bars[8] = (100.0, 111.0, 99.0, 100.0)
+    bars[9] = (100.0, 101.0, 99.0, 100.0)
+    bars[28] = (100.0, 100.5, 94.0, 95.5)
+    bars[29] = (95.5, 96.0, 93.0, 94.0)
+    if bar_count > 30:
+        bars[30] = (94.0, 94.4, 92.8, 93.2)
+    if bar_count > 31:
+        bars[31] = (93.2, 93.8, 92.5, 92.8)
+
+    observations = []
+    start = ts("2026-01-01T10:00:00Z")
+    for index, bar in enumerate(bars):
+        timestamp = start + pd.Timedelta(minutes=index)
+        item = source(
+            f"auto-mss-bar-{index}",
+            timestamp.isoformat(),
+            (timestamp + pd.Timedelta(seconds=1)).isoformat(),
+        )
+        observations.append(
+            SubjectVisibleObservation(
+                value={
+                    "open": bar[0],
+                    "high": bar[1],
+                    "low": bar[2],
+                    "close": bar[3],
+                    "source_id": item.source_id,
+                },
+                timing=timing(
+                    timestamp.isoformat(),
+                    (item,),
+                    available=item.availability_timestamp.isoformat(),
+                    base_scoped=True,
+                ),
+                scope=ObservationScope.BASE,
+            )
+        )
+    last = observations[-1].timing.source_observations[0]
+    current = ReplaySubject(
+        availability_timestamp=last.availability_timestamp,
+        base_bar_timestamp=last.event_timestamp,
+    )
+    return SubjectVisibleInputs(
+        subject=current,
+        availability_timestamp=current.availability_timestamp,
+        base_observations=tuple(observations),
+        context_observations=(),
+    )
+
+
+def test_default_pipeline_derives_point_in_time_mss_from_visible_price_action():
+    from src.core_v1_pipeline import evaluate_core_v1_pipeline
+
+    inputs = visible_auto_mss_inputs()
+    result = evaluate_core_v1_pipeline(inputs)
+
+    assert result.liquidity is not None
+    assert result.displacement is not None
+    assert result.displacement.status is DisplacementStatus.DISPLACEMENT
+    assert result.mss is not None
+    assert result.mss.status is MSSStatus.MSS
+    assert result.mss.structural_point.kind is SwingType.LOW
+    assert result.mss.structural_point.price == 97.0
+    assert result.mss.structural_point.timing.event_timestamp == ts(
+        "2026-01-01T10:05:00Z"
+    )
+    assert result.mss.structural_break.timing.event_timestamp == ts(
+        "2026-01-01T10:29:00Z"
+    )
+    assert result.mss.confirmation_timestamp == ts("2026-01-01T10:31:00Z")
+    assert result.zone is None
+    assert result.hypothesis is None
+
+
+def test_visible_mss_follow_through_after_subject_cutoff_stays_unresolved():
+    from src.core_v1_pipeline import evaluate_core_v1_pipeline
+
+    earlier = evaluate_core_v1_pipeline(visible_auto_mss_inputs(bar_count=31))
+    later = evaluate_core_v1_pipeline(visible_auto_mss_inputs(bar_count=32))
+
+    assert earlier.mss is not None
+    assert earlier.mss.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert "follow-through is unresolved" in earlier.mss.reason
+    assert later.mss is not None
+    assert later.mss.status is MSSStatus.MSS
+    assert earlier.subject.base_bar_timestamp < later.mss.confirmation_timestamp
+
+
+def test_visible_mss_requires_sweep_classification_not_just_rejection():
+    from src.core_v1_pipeline import evaluate_core_v1_pipeline
+
+    inputs = visible_auto_mss_inputs()
+    pipeline = evaluate_core_v1_pipeline(inputs)
+    assert pipeline.liquidity is not None
+    assert pipeline.displacement is not None
+    unresolved_liquidity = replace(
+        pipeline.liquidity,
+        sweep=SweepKind.UNRESOLVED,
+        sweep_timing=None,
+        sweep_provenance={},
+    )
+
+    result = evaluate_core_v1_mss(
+        inputs,
+        liquidity_event=unresolved_liquidity,
+        displacement=pipeline.displacement,
+        derive_visible=True,
+    )
+
+    assert result.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert result.structural_point is None
+    assert result.structural_break is None
+
+
+
+def test_mss_pivot_window_must_be_available_before_liquidity_breach():
+    from src.core_v1_pipeline import evaluate_core_v1_pipeline
+
+    inputs = visible_auto_mss_inputs()
+    observations = list(inputs.base_observations)
+    confirmation_bar = observations[7]
+    old_source = confirmation_bar.timing.source_observations[0]
+    late_source = replace(
+        old_source,
+        availability_timestamp=ts("2026-01-01T10:08:01Z"),
+    )
+    late_timing = replace(
+        confirmation_bar.timing,
+        availability_timestamp=late_source.availability_timestamp,
+        source_observations=(late_source,),
+    )
+    observations[7] = replace(confirmation_bar, timing=late_timing)
+    delayed_inputs = SubjectVisibleInputs(
+        subject=inputs.subject,
+        availability_timestamp=inputs.subject.availability_timestamp,
+        base_observations=tuple(observations),
+        context_observations=inputs.context_observations,
+    )
+
+    result = evaluate_core_v1_pipeline(delayed_inputs)
+
+    assert result.displacement is not None
+    assert result.displacement.status is DisplacementStatus.DISPLACEMENT
+    assert result.mss is not None
+    assert result.mss.status is MSSStatus.NOT_MSS_UNRESOLVED
