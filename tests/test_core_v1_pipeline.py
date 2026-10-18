@@ -30,6 +30,8 @@ from tests.test_core_v1_retracement import (
     make_timing,
     ts,
 )
+from tests.test_core_v1_liquidity import make_inputs as make_liquidity_inputs
+from tests.test_core_v1_liquidity import priced_inputs
 from src.core_v1_displacement import DisplacementStatus
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
@@ -217,6 +219,70 @@ def test_complete_governed_pipeline_preserves_all_stages_and_timing():
     for name, sources in result.hypothesis.provenance.items():
         assert result.provenance[name] == sources
     assert set(result.hypothesis.provenance).issubset(result.provenance)
+
+
+def test_pipeline_derives_visible_liquidity_and_keeps_later_stages_fail_closed():
+    inputs = make_liquidity_inputs()
+
+    result = evaluate_core_v1_pipeline(inputs=inputs)
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.liquidity is not None
+    assert result.liquidity.sweep is SweepKind.SWEEP
+    assert result.liquidity.reaction is not None
+    assert result.liquidity.reaction.kind is ReactionKind.REJECTION
+    assert result.displacement is None
+    assert result.hypothesis is None
+    assert "displacement evidence is missing" in result.reason
+
+
+def test_automatic_liquidity_respects_the_subject_visibility_cutoff():
+    rows = (
+        ("2026-01-01T10:00:00Z", 100.0, 102.0, 98.0, 100.0),
+        ("2026-01-01T10:01:00Z", 100.0, 104.0, 97.0, 101.0),
+        ("2026-01-01T10:02:00Z", 101.0, 105.0, 95.0, 102.0),
+        ("2026-01-01T10:03:00Z", 102.0, 103.0, 98.0, 100.0),
+        ("2026-01-01T10:04:00Z", 100.0, 101.0, 99.0, 100.0),
+        ("2026-01-01T10:05:00Z", 100.0, 106.0, 96.0, 105.5),
+        ("2026-01-01T10:06:00Z", 105.0, 106.0, 94.0, 100.0),
+    )
+    before_reaction = evaluate_core_v1_pipeline(
+        inputs=priced_inputs(rows[:6]),
+    )
+    after_reaction = evaluate_core_v1_pipeline(
+        inputs=priced_inputs(rows),
+    )
+
+    assert before_reaction.liquidity is not None
+    assert before_reaction.liquidity.breach is not None
+    assert before_reaction.liquidity.reaction is None
+    assert before_reaction.liquidity.sweep is SweepKind.UNRESOLVED
+    assert after_reaction.liquidity is not None
+    assert after_reaction.liquidity.sweep is SweepKind.SWEEP
+    assert (
+        before_reaction.liquidity.breach.timing.event_timestamp
+        == after_reaction.liquidity.breach.timing.event_timestamp
+    )
+
+
+def test_automatic_liquidity_conflicts_fail_closed():
+    inputs = priced_inputs(
+        (
+            ("2026-01-01T10:00:00Z", 100.0, 103.0, 97.0, 100.0),
+            ("2026-01-01T10:01:00Z", 100.0, 104.0, 96.0, 101.0),
+            ("2026-01-01T10:02:00Z", 101.0, 106.0, 94.0, 102.0),
+            ("2026-01-01T10:03:00Z", 102.0, 104.0, 96.0, 100.0),
+            ("2026-01-01T10:04:00Z", 100.0, 103.0, 97.0, 100.0),
+            ("2026-01-01T10:05:00Z", 100.0, 107.0, 93.0, 100.0),
+        )
+    )
+
+    result = evaluate_core_v1_pipeline(inputs=inputs)
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.liquidity is None
+    assert result.hypothesis is None
+    assert "unavailable or ambiguous" in result.reason
 
 
 def test_pipeline_provenance_rejects_oversized_mapping_keys():

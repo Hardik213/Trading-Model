@@ -341,7 +341,11 @@ def evaluate_core_v1_pipeline(
     target: CoreV1OpposingLiquidityTarget | None = None,
     target_resolver: OpposingLiquidityTargetResolver | None = None,
 ) -> CoreV1PipelineResult:
-    """Compose existing governed stage outputs without supplying detector policy."""
+    """Compose governed evidence, deriving liquidity from visible swings by default.
+
+    Automatic liquidity detection does not apply maximum-age expiry; the market
+    calendar needed for trading-time aging is not configured.
+    """
     if not isinstance(inputs, SubjectVisibleInputs):
         raise TypeError("inputs must be SubjectVisibleInputs.")
     subject = inputs.subject
@@ -358,6 +362,18 @@ def evaluate_core_v1_pipeline(
     _validate_visible_component(inputs, context.provenance, "Dealing-range context")
 
     visible_levels = detect_core_v1_liquidity_levels(inputs)
+    # A supplied MSS is identity-linked to its liquidity assessment.
+    derive_liquidity = liquidity is None and mss is None
+    if derive_liquidity:
+        assessments = evaluate_core_v1_liquidity(inputs, levels=visible_levels)
+        event_assessments = tuple(
+            assessment
+            for assessment in assessments
+            if assessment.breach is not None
+        )
+        if len(event_assessments) == 1:
+            liquidity = event_assessments[0]
+
     if liquidity is not None:
         if not isinstance(liquidity, CoreV1LiquidityAssessment):
             raise TypeError("liquidity must be a CoreV1LiquidityAssessment.")
@@ -426,7 +442,11 @@ def evaluate_core_v1_pipeline(
         return _incomplete(
             inputs,
             context,
-            "DEVELOPING: required governed liquidity evidence is missing.",
+            (
+                "DEVELOPING: automatic visible liquidity assessment is unavailable or ambiguous."
+                if derive_liquidity
+                else "DEVELOPING: required governed liquidity evidence is missing."
+            ),
             draw_on_liquidity=draw_on_liquidity,
             opposing_liquidity_levels=opposing_liquidity_levels,
         )

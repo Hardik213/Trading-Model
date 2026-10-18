@@ -11,6 +11,7 @@ from src.core_v1_decision_bridge import CoreV1QuantityInput
 from src.core_v1_evidence import SubjectVisibleInputs
 from src.core_v1_liquidity import (
     CoreV1LiquidityAssessment,
+    SweepKind,
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
@@ -235,6 +236,62 @@ def test_production_pipeline_configuration_uses_canonical_evaluator():
     assert (
         instance.pipeline_builder_identity
         == "src.core_v1_pipeline.evaluate_core_v1_pipeline"
+    )
+
+
+def test_public_default_path_derives_visible_liquidity_without_supplied_evidence():
+    bars = (
+        (100.0, 102.0, 98.0, 100.0),
+        (100.0, 104.0, 97.0, 101.0),
+        (101.0, 105.0, 95.0, 102.0),
+        (102.0, 103.0, 98.0, 100.0),
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 106.0, 96.0, 105.5),
+        (105.0, 106.0, 94.0, 100.0),
+        (100.0, 101.0, 99.0, 100.0),
+    )
+    ticks = []
+    source_order = 0
+    for minute, prices in enumerate(bars):
+        for second, price in zip((5, 15, 30, 45), prices):
+            ticks.append(
+                tick(
+                    f"2026-01-01T10:{minute:02d}:{second:02d}Z",
+                    source_order,
+                    bid=price,
+                    ask=price + 0.5,
+                )
+            )
+            source_order += 1
+
+    instance = integration()
+    report = instance.run(ticks)
+
+    assert instance.pipeline_builder is None
+    assert instance.pipeline_inputs_provider is None
+    assert report.subject_executions
+    assessments = tuple(
+        item.pipeline_result.liquidity
+        for item in report.subject_executions
+        if item.pipeline_result.liquidity is not None
+    )
+    assert len(assessments) >= 2
+    assert assessments[0].sweep is SweepKind.UNRESOLVED
+    assert assessments[0].reaction is None
+    assert assessments[-1].sweep is SweepKind.SWEEP
+    assert assessments[-1].reaction is not None
+    assert assessments[-1].reaction.timing.confirmation_timestamp == ts(
+        "2026-01-01T10:07:00Z"
+    )
+    assert all(
+        item.pipeline_builder_identity
+        == "src.core_v1_pipeline.evaluate_core_v1_pipeline"
+        for item in report.subject_executions
+    )
+    assert all(
+        item.pipeline_result.state is PrecisionState.DEVELOPING
+        for item in report.subject_executions
     )
 
 
