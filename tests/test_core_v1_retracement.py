@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 
 import pandas as pd
 import pytest
@@ -42,6 +42,7 @@ from src.core_v1_reactionary_zones import (
     evaluate_core_v1_fvg,
 )
 from src.core_v1_retracement import (
+    FVGQuarterRejectionEntryResolver,
     FirstTouchFVGRejectionEntryResolver,
     CoreV1PlannedEntry,
     CoreV1RetracementInputs,
@@ -489,6 +490,81 @@ def make_fixture() -> Fixture:
         interaction,
         planned_entry,
     )
+
+
+def _rebind_subject(value, subject, memo):
+    if isinstance(value, ReplaySubject):
+        return subject
+    if isinstance(value, tuple):
+        return tuple(_rebind_subject(item, subject, memo) for item in value)
+    if isinstance(value, list):
+        return [_rebind_subject(item, subject, memo) for item in value]
+    if is_dataclass(value):
+        if id(value) in memo:
+            return memo[id(value)]
+        updates = {}
+        for field in fields(value):
+            current = getattr(value, field.name)
+            if field.name == "subject" and isinstance(current, ReplaySubject):
+                updates[field.name] = subject
+            elif (
+                field.name == "availability_timestamp"
+                and any(item.name == "subject" for item in fields(value))
+            ):
+                updates[field.name] = subject.availability_timestamp
+            else:
+                rebound = _rebind_subject(current, subject, memo)
+                if rebound is not current:
+                    updates[field.name] = rebound
+        result = replace(value, **updates)
+        memo[id(value)] = result
+        return result
+    return value
+
+
+def _extended_fvg_request(fixture: Fixture, bars):
+    last_bar = bars[-1]
+    last_time = ts(last_bar[1])
+    subject = ReplaySubject(
+        availability_timestamp=last_time,
+        base_bar_timestamp=last_time,
+    )
+    memo = {}
+    inputs = _rebind_subject(fixture.inputs, subject, memo)
+    mss = _rebind_subject(fixture.mss, subject, memo)
+    liquidity = _rebind_subject(fixture.liquidity, subject, memo)
+    displacement = _rebind_subject(fixture.displacement, subject, memo)
+    zone = _rebind_subject(fixture.zone, subject, memo)
+    extra_observations = []
+    for source_id, timestamp, open_, high, low, close in bars:
+        source = make_source(source_id, timestamp)
+        extra_observations.append(
+            SubjectVisibleObservation(
+                value={"open": open_, "high": high, "low": low, "close": close},
+                timing=make_timing(timestamp, (source,)),
+                scope=ObservationScope.BASE,
+            )
+        )
+    inputs = replace(
+        inputs,
+        base_observations=tuple(
+            sorted(
+                (*inputs.base_observations, *extra_observations),
+                key=lambda item: item.timing.event_timestamp,
+            )
+        ),
+    )
+    interaction = derive_visible_fvg_interaction(inputs, zone, mss)
+    assert interaction is not None
+    request = CoreV1RetracementInputs(
+        visible_inputs=inputs,
+        mss=mss,
+        liquidity=liquidity,
+        displacement=displacement,
+        zone=zone,
+        interaction=interaction,
+    )
+    return request
 
 
 @dataclass
@@ -1490,6 +1566,119 @@ def test_experimental_first_touch_supports_bearish_fvg_far_edge():
     assert candidate.timing.provenance["trigger"] == (
         "first-post-mss-fvg-overlap-closes-beyond-far-edge"
     )
+
+
+def test_e009_waits_through_inside_closes_and_uses_later_rejection_bar():
+    fixture = make_fixture()
+    initial_touch_time = ts("2026-01-01T10:06:10Z")
+    inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            replace(
+                item,
+                value={**item.value, "close": 102.5, "low": 100.5},
+            )
+            if item.timing.event_timestamp == initial_touch_time
+            else item
+            for item in fixture.inputs.base_observations
+        ),
+    )
+    fixture.inputs = inputs
+    request = _extended_fvg_request(
+        fixture,
+        (
+            ("inside-close", "2026-01-01T10:06:20Z", 102.5, 103.0, 102.0, 102.75),
+            ("rejection-close", "2026-01-01T10:06:30Z", 102.75, 103.25, 102.5, 103.1),
+        ),
+    )
+
+    candidate = FVGQuarterRejectionEntryResolver().qualify(request)
+
+    assert candidate is not None
+    assert candidate.planned_entry_price == 103.1
+    assert candidate.timing.event_timestamp == ts("2026-01-01T10:06:30Z")
+    assert any(
+        source.source_id == "inside-close"
+        for source in candidate.timing.source_observations
+    )
+    assert any(
+        source.source_id == "rejection-close"
+        for source in candidate.timing.source_observations
+    )
+    assert candidate.timing.provenance["fill_status"] == "NOT_A_FILL"
+
+
+@pytest.mark.parametrize(
+    ("first_close", "expect_entry"),
+    ((101.5, True), (101.49, False)),
+)
+def test_e009_bullish_quarter_threshold_is_close_based_and_strict(
+    first_close, expect_entry
+):
+    fixture = make_fixture()
+    touch_time = ts("2026-01-01T10:06:10Z")
+    fixture.inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            replace(item, value={**item.value, "close": first_close})
+            if item.timing.event_timestamp == touch_time
+            else item
+            for item in fixture.inputs.base_observations
+        ),
+    )
+    request = _extended_fvg_request(
+        fixture,
+        (("later-rejection", "2026-01-01T10:06:20Z", 102.5, 103.2, 102.2, 103.1),),
+    )
+
+    candidate = FVGQuarterRejectionEntryResolver().qualify(request)
+
+    assert (candidate is not None) is expect_entry
+    if candidate is not None:
+        assert candidate.timing.event_timestamp == ts("2026-01-01T10:06:20Z")
+
+
+@pytest.mark.parametrize(
+    ("first_close", "expect_entry"),
+    ((102.5, True), (102.51, False)),
+)
+def test_e009_bearish_quarter_threshold_is_close_based_and_strict(
+    first_close, expect_entry
+):
+    fixture = make_fixture()
+    bearish_fvg = replace(
+        fixture.zone.fvg,
+        direction=FVGDirection.BEARISH,
+        lower_bound=101.0,
+        upper_bound=103.0,
+        midpoint=102.0,
+        size=2.0,
+    )
+    fixture.zone = replace(fixture.zone, fvg=bearish_fvg)
+    fixture.displacement = replace(
+        fixture.displacement,
+        observation=replace(fixture.displacement.observation, direction=Direction.BEARISH),
+    )
+    touch_time = ts("2026-01-01T10:06:10Z")
+    fixture.inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            replace(item, value={**item.value, "close": first_close})
+            if item.timing.event_timestamp == touch_time
+            else item
+            for item in fixture.inputs.base_observations
+        ),
+    )
+    request = _extended_fvg_request(
+        fixture,
+        (("later-bearish-rejection", "2026-01-01T10:06:20Z", 101.5, 102.0, 100.5, 100.9),),
+    )
+
+    candidate = FVGQuarterRejectionEntryResolver().qualify(request)
+
+    assert (candidate is not None) is expect_entry
+    if candidate is not None:
+        assert candidate.timing.event_timestamp == ts("2026-01-01T10:06:20Z")
 
 
 def test_supplied_interaction_at_mss_confirmation_cannot_qualify_entry():

@@ -43,7 +43,7 @@ from .core_v1_reactionary_zones import (
 from .core_v1_retracement import (
     CoreV1RetracementResult,
     CoreV1ZoneInteraction,
-    FirstTouchFVGRejectionEntryResolver,
+    FVGQuarterRejectionEntryResolver,
     ReactionaryZone,
     RetracementEntryResolver,
     derive_visible_fvg_interaction,
@@ -603,7 +603,7 @@ def evaluate_core_v1_pipeline(
         resolver=(
             entry_resolver
             if entry_resolver is not None
-            else FirstTouchFVGRejectionEntryResolver()
+            else FVGQuarterRejectionEntryResolver()
         ),
     )
     if entry.state is not PrecisionState.VALID:

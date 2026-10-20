@@ -1045,6 +1045,10 @@ def test_pipeline_runs_experimental_entry_through_structural_risk_gates(monkeypa
     assert result.retracement.state is PrecisionState.VALID
     assert result.retracement.planned_entry is not None
     assert result.retracement.planned_entry_price == 113.0
+    assert (
+        result.retracement.planned_entry.timing.provenance["resolver"]
+        == "core-v1-e009-fvg-quarter-rejection"
+    )
     assert result.state is PrecisionState.VALID
     assert result.hypothesis is not None
     assert result.hypothesis.state is PrecisionState.VALID
