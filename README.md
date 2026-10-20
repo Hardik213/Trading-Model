@@ -17,6 +17,8 @@ This repository is developing a point-in-time-correct implementation of the ICT 
 - `src/tick_execution.py` contains execution records and explicit execution configuration.
 - `docs/core_v1_*_contract.md` records current development contracts and unresolved rules.
 - `docs/evaluation_protocol.md` governs model freeze and any future evaluation.
+- `configs/core_v1_development.json` records current development assumptions and unresolved freeze blockers; it is not a frozen run configuration.
+- `scripts/check_core_v1_freeze.py` reports configuration hash and blockers without loading market data or running a replay.
 - `docs/strategy_variant_log.csv` is the append-only development and experiment record.
 - `data/raw/` is local input data and is not committed to Git.
 

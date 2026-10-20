@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "configuration_status": "DEVELOPMENT_NOT_FROZEN",
+  "model": {
+    "model_id": "ICT-2022-CORE-V1",
+    "instrument": "XAUUSD",
+    "base_timeframe": "5M",
+    "base_timeframe_status": "DOCUMENTED_DEFAULT_NOT_RUN_CONFIGURED",
+    "variant_scope": "ICT_2022_CORE_V1_ONLY",
+    "mmxm_2023_status": "SEPARATE_FUTURE_VARIANT_NOT_IN_CORE_V1"
+  },
+  "periods_utc": {
+    "development": {
+      "start_inclusive": "2022-01-01T00:00:00Z",
+      "end_exclusive": "2025-01-01T00:00:00Z"
+    },
+    "holdout": {
+      "start_inclusive": "2025-01-01T00:00:00Z",
+      "end_exclusive": "2026-01-01T00:00:00Z",
+      "authorization": "BLOCKED"
+    }
+  },
+  "strategy_rules": {
+    "displacement": {
+      "detector": "src.displacement.detect_displacement",
+      "baseline_bars": 20,
+      "minimum_body_ratio": 0.6,
+      "minimum_range_expansion": 1.25,
+      "minimum_bullish_close_location": 0.7,
+      "maximum_bearish_close_location": 0.3,
+      "follow_through_bars": 2,
+      "direction_source": "CONFIRMED_LIQUIDITY_EVENT",
+      "candidate_selection": "LATEST_ELIGIBLE_CONFIRMATION_THEN_EVENT_TIME"
+    },
+    "retracement_entry": {
+      "interaction": "FIRST_VISIBLE_POST_MSS_FVG_OVERLAP",
+      "exact_touch_price": "NOT_INFERRED",
+      "entry_rule_id": "E008-20261020-FIRST-TOUCH-FVG-REJECTION",
+      "entry_rule_status": "EXPERIMENTAL_NOT_ACCEPTED_OR_PERFORMANCE_EVALUATED",
+      "planned_entry_is_fill": false
+    },
+    "lifetime_implementation": "DEFERRED_TRADING_TIME_REQUIRED",
+    "breached_without_rejection_consumption": "UNRESOLVED",
+    "dealing_range_anchor_policy": "CALLER_GOVERNED_UNRESOLVED_FOR_FREEZE",
+    "strategy_session_gate": "BLOCKED_PENDING_DST_AWARE_POLICY"
+  },
+  "execution_configuration": {
+    "mode": "HISTORICAL_TICK_SIMULATION_ONLY",
+    "maximum_concurrent_positions": 1,
+    "risk_ceiling_fraction": 0.01,
+    "starting_equity": null,
+    "account_currency": null,
+    "contract_size": null,
+    "minimum_quantity": null,
+    "quantity_step": null,
+    "account_currency_conversion_policy": null,
+    "commission_per_unit_per_side": null,
+    "slippage_per_unit_per_side": null,
+    "live_broker_enabled": false
+  },
+  "freeze_blockers": [
+    "Owner decision required to accept, replace, or reject the experimental E008 entry trigger.",
+    "Trading-time liquidity lifetime requires a verified XAUUSD trading calendar and implementation.",
+    "Consumption behavior for a breached but unrejected liquidity level remains unresolved.",
+    "A deterministic dealing-range anchor policy is not selected.",
+    "Daily and H4 boundary convention remains pending timezone-aware verification.",
+    "A DST-aware session policy is not implemented; session-filtered experiments remain blocked.",
+    "Execution configuration requires confirmed account currency, contract size, quantity rules, conversion policy, commission, and slippage.",
+    "Starting equity and exact run-time execution configuration are not recorded.",
+    "No frozen strategy configuration hash, clean frozen build record, or run environment record exists.",
+    "No holdout authorization has been given."
+  ]
+}
