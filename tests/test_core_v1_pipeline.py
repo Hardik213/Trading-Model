@@ -303,7 +303,7 @@ def test_valid_planned_entry_inside_owner_session_window_reaches_hypothesis(monk
     assert result.hypothesis.state is PrecisionState.VALID
 
 
-def test_planned_entry_at_session_end_is_blocked_before_hypothesis(monkeypatch):
+def test_planned_entry_outside_session_window_is_blocked_before_hypothesis(monkeypatch):
     monkeypatch.setattr(pipeline_module, "core_v1_entry_session", core_v1_entry_session)
     fixture, kwargs = pipeline_fixture()
     source = replace(
