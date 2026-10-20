@@ -31,6 +31,7 @@ from tests.test_core_v1_hypothesis import (
 )
 from tests.test_core_v1_retracement import (
     FixedEntryResolver,
+    governed_directional_evidence,
     make_fixture,
     make_timing,
     ts,
@@ -168,6 +169,11 @@ def pipeline_fixture():
         *target.liquidity_level.timing.source_observations,
     )
     inputs = with_extra_visible(fixture.inputs, added_sources)
+    context, draw_on_liquidity = governed_directional_evidence(
+        inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     (liquidity,) = evaluate_core_v1_liquidity(
         inputs,
         levels=(fixture.liquidity.level,),
@@ -183,7 +189,11 @@ def pipeline_fixture():
     fixture.liquidity = liquidity
     fixture.mss = mss
     entry_sources = list(fixture.planned_entry.timing.source_observations)
-    for source in added_sources:
+    required_directional_sources = (
+        *context.provenance,
+        *draw_on_liquidity.timing.source_observations,
+    )
+    for source in (*added_sources, *required_directional_sources):
         if source not in entry_sources:
             entry_sources.append(source)
     entry_timing = replace(
@@ -193,6 +203,8 @@ def pipeline_fixture():
     planned_entry = replace(fixture.planned_entry, timing=entry_timing)
     kwargs = {
         "inputs": inputs,
+        "context": context,
+        "draw_on_liquidity": draw_on_liquidity,
         "liquidity": fixture.liquidity,
         "displacement": fixture.displacement,
         "mss": fixture.mss,
@@ -555,6 +567,11 @@ def test_missing_or_unresolved_prerequisite_blocks_every_later_stage(
             levels=(fixture.liquidity.level,),
         )
         kwargs["inputs"] = unresolved_inputs
+        kwargs["context"], kwargs["draw_on_liquidity"] = governed_directional_evidence(
+            unresolved_inputs,
+            fixture.displacement.observation.direction,
+            before=fixture.liquidity.breach.timing.event_timestamp,
+        )
         kwargs["target"] = None
         kwargs["opposing_liquidity_levels"] = ()
     entry_resolver = kwargs["entry_resolver"]
@@ -574,6 +591,27 @@ def test_missing_zone_blocks_entry_even_when_every_other_stage_is_available():
     assert result.state is PrecisionState.DEVELOPING
     assert result.zone is None
     assert result.retracement.state is PrecisionState.DEVELOPING
+    assert result.hypothesis is None
+    assert resolver.received is None
+
+
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    [
+        ({"context": None}, "resolved dealing-range context is required"),
+        ({"draw_on_liquidity": None}, "explicit draw-on-liquidity evidence is required"),
+    ],
+)
+def test_missing_directional_context_or_draw_blocks_canonical_entry(override, reason):
+    fixture, kwargs = pipeline_fixture()
+    resolver = kwargs["entry_resolver"]
+
+    result = evaluate(kwargs, **override)
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.retracement is not None
+    assert result.retracement.state is PrecisionState.DEVELOPING
+    assert reason in result.reason
     assert result.hypothesis is None
     assert resolver.received is None
 

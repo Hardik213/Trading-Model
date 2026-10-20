@@ -5,13 +5,17 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, Protocol, TypeAlias
 
-from .core_v1_dealing_range import DealingRangeContext
+from .core_v1_dealing_range import DealingRangeContext, DealingRangeStatus
 from .core_v1_displacement import (
     CoreV1DisplacementAssessment,
     DisplacementStatus,
 )
 from .core_v1_evidence import SubjectVisibleInputs
-from .core_v1_liquidity import CoreV1LiquidityAssessment, CoreV1LiquidityLevel
+from .core_v1_liquidity import (
+    CoreV1LiquidityAssessment,
+    CoreV1LiquidityLevel,
+    detect_core_v1_liquidity_levels,
+)
 from .core_v1_mss import CoreV1MSSResult, MSSStatus
 from .core_v1_reactionary_zones import (
     CoreV1FVGObservation,
@@ -21,6 +25,7 @@ from .core_v1_reactionary_zones import (
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from .displacement import Direction
 from .fvg import FVGDirection
+from .market_structure import LiquiditySide
 from .replay_subject import ReplaySubject, same_subject_id
 # Reuse these four state labels only; no precision-gate rules are imported.
 from .sniper_setup import PrecisionState
@@ -217,6 +222,14 @@ class CoreV1RetracementResult:
         if self.state is PrecisionState.VALID:
             if self.planned_entry is None:
                 raise ValueError("VALID entry qualification requires a planned entry.")
+            if self.context is None or self.context.status is not DealingRangeStatus.RESOLVED:
+                raise ValueError(
+                    "VALID entry qualification requires a resolved dealing-range context."
+                )
+            if self.draw_on_liquidity is None:
+                raise ValueError(
+                    "VALID entry qualification requires explicit draw-on-liquidity evidence."
+                )
             if self.zone is None or self.interaction is None:
                 raise ValueError(
                     "VALID entry qualification requires a reactionary zone and post-availability interaction."
@@ -238,9 +251,24 @@ class CoreV1RetracementResult:
                 or self.liquidity is None
                 or self.displacement is None
                 or self.displacement.status is not DisplacementStatus.DISPLACEMENT
+                or self.displacement.observation is None
             ):
                 raise ValueError(
                     "VALID entry qualification requires resolved MSS, liquidity, and displacement."
+                )
+            expected_draw_side = (
+                LiquiditySide.BSL
+                if self.displacement.observation.direction is Direction.BULLISH
+                else LiquiditySide.SSL
+                if self.displacement.observation.direction is Direction.BEARISH
+                else None
+            )
+            if (
+                expected_draw_side is None
+                or self.draw_on_liquidity.side is not expected_draw_side
+            ):
+                raise ValueError(
+                    "VALID entry qualification requires draw-on-liquidity aligned with displacement direction."
                 )
             if (
                 self.mss.liquidity_event is not self.liquidity
@@ -541,6 +569,44 @@ def evaluate_core_v1_retracement(
         return _unresolved(request, "Required MSS evidence is missing or unresolved.")
 
     _validate_mss_sequence(request)
+    if request.context is None or request.context.status is not DealingRangeStatus.RESOLVED:
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: a resolved dealing-range context is required.",
+        )
+    assert request.liquidity.breach is not None
+    liquidity_event_timestamp = request.liquidity.breach.timing.event_timestamp
+    if request.context.availability_timestamp >= liquidity_event_timestamp:
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: dealing-range context must be available before the liquidity event.",
+        )
+    if request.draw_on_liquidity is None:
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: explicit draw-on-liquidity evidence is required.",
+        )
+    if request.draw_on_liquidity.timing.availability_timestamp >= liquidity_event_timestamp:
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: draw-on-liquidity must be available before the liquidity event.",
+        )
+    assert request.displacement.observation is not None
+    expected_draw_side = (
+        LiquiditySide.BSL
+        if request.displacement.observation.direction is Direction.BULLISH
+        else LiquiditySide.SSL
+        if request.displacement.observation.direction is Direction.BEARISH
+        else None
+    )
+    if (
+        expected_draw_side is None
+        or request.draw_on_liquidity.side is not expected_draw_side
+    ):
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: draw-on-liquidity conflicts with displacement direction.",
+        )
     if zone is None or interaction is None:
         return _unresolved(
             request,
@@ -747,6 +813,33 @@ def _validate_context(
     ):
         raise ValueError("Context confirmation exceeds the ReplaySubject base-bar cutoff.")
     _validate_visible_sources(context.provenance, inputs, "Context")
+    if context.status is DealingRangeStatus.RESOLVED:
+        dealing_range = context.dealing_range
+        if dealing_range is None:
+            raise ValueError("Resolved context must include its anchored dealing range.")
+        try:
+            high = float(dealing_range.anchor_high)
+            low = float(dealing_range.anchor_low)
+            equilibrium = float(dealing_range.equilibrium)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Resolved context range anchors must be finite prices.") from exc
+        if (
+            not isfinite(high)
+            or not isfinite(low)
+            or not isfinite(equilibrium)
+            or high <= low
+            or equilibrium != (high + low) / 2
+        ):
+            raise ValueError("Resolved context has invalid dealing-range geometry.")
+        anchor_times = {
+            _utc_timestamp(dealing_range.anchor_high_timestamp, "anchor_high_timestamp"),
+            _utc_timestamp(dealing_range.anchor_low_timestamp, "anchor_low_timestamp"),
+        }
+        source_event_times = {source.event_timestamp for source in context.provenance}
+        if not anchor_times.issubset(source_event_times):
+            raise ValueError(
+                "Resolved context range anchors must be supported by its visible provenance."
+            )
 
 
 def _validate_draw(draw: CoreV1LiquidityLevel, inputs: SubjectVisibleInputs) -> None:
@@ -755,6 +848,10 @@ def _validate_draw(draw: CoreV1LiquidityLevel, inputs: SubjectVisibleInputs) -> 
         raise ValueError("Draw-on-liquidity belongs to another ReplaySubject.")
     _validate_visible_sources(timing.source_observations, inputs, "Draw-on-liquidity")
     _validate_base_bar_scope(timing, inputs.subject, "Draw-on-liquidity")
+    if draw not in detect_core_v1_liquidity_levels(inputs):
+        raise ValueError(
+            "Draw-on-liquidity must match a liquidity level recomputed from visible swings."
+        )
 
 
 def _validate_visible_sources(
@@ -984,6 +1081,10 @@ def _unresolved_provenance(
         result["reactionary_zone"] = _zone_timing(request.zone).source_observations
     if request.interaction is not None:
         result["zone_interaction"] = request.interaction.timing.source_observations
+    if request.context is not None:
+        result["context"] = request.context.provenance
+    if request.draw_on_liquidity is not None:
+        result["draw_on_liquidity"] = request.draw_on_liquidity.timing.source_observations
     return result
 
 

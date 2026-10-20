@@ -20,7 +20,12 @@ from src.evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from src.market_structure import LiquiditySide
 from src.replay_subject import ReplaySubject
 from src.sniper_setup import PrecisionState
-from tests.test_core_v1_retracement import FixedEntryResolver, make_fixture
+from tests.test_core_v1_retracement import (
+    FixedEntryResolver,
+    governed_directional_evidence,
+    make_fixture,
+    with_visible_ssl_swing,
+)
 from src.core_v1_retracement import evaluate_core_v1_retracement
 
 
@@ -69,11 +74,18 @@ def timing(
 
 def valid_entry(fixture=None):
     fixture = fixture or make_fixture()
+    context, draw_on_liquidity = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     result = evaluate_core_v1_retracement(
         fixture.inputs,
         mss=fixture.mss,
         liquidity=fixture.liquidity,
         displacement=fixture.displacement,
+        context=context,
+        draw_on_liquidity=draw_on_liquidity,
         zone=fixture.zone,
         interaction=fixture.interaction,
         resolver=FixedEntryResolver(fixture.planned_entry),
@@ -196,6 +208,12 @@ def test_hypothesis_provenance_rejects_oversized_mapping_keys():
 
 def test_valid_short_complete_hypothesis_uses_governed_bearish_direction():
     fixture, entry = valid_entry()
+    fixture.inputs = with_visible_ssl_swing(fixture.inputs)
+    short_context, short_draw = governed_directional_evidence(
+        fixture.inputs,
+        Direction.BEARISH,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     short_displacement = replace(
         fixture.displacement,
         observation=replace(
@@ -221,6 +239,13 @@ def test_valid_short_complete_hypothesis_uses_governed_bearish_direction():
         entry,
         displacement=short_displacement,
         mss=short_mss,
+        context=short_context,
+        draw_on_liquidity=short_draw,
+        provenance={
+            **entry.provenance,
+            "context": short_context.provenance,
+            "draw_on_liquidity": short_draw.timing.source_observations,
+        },
     )
     invalidation, target = components(
         fixture,
@@ -406,6 +431,12 @@ def test_incoherent_directional_geometry_returns_invalid(
 ):
     fixture, entry = valid_entry()
     if direction == "SHORT":
+        fixture.inputs = with_visible_ssl_swing(fixture.inputs)
+        short_context, short_draw = governed_directional_evidence(
+            fixture.inputs,
+            Direction.BEARISH,
+            before=fixture.liquidity.breach.timing.event_timestamp,
+        )
         short_displacement = replace(
             fixture.displacement,
             observation=replace(
@@ -423,7 +454,18 @@ def test_incoherent_directional_geometry_returns_invalid(
                 structural_break=short_break,
             ),
         )
-        entry = replace(entry, displacement=short_displacement, mss=short_mss)
+        entry = replace(
+            entry,
+            displacement=short_displacement,
+            mss=short_mss,
+            context=short_context,
+            draw_on_liquidity=short_draw,
+            provenance={
+                **entry.provenance,
+                "context": short_context.provenance,
+                "draw_on_liquidity": short_draw.timing.source_observations,
+            },
+        )
     invalidation, target = components(
         fixture,
         entry,

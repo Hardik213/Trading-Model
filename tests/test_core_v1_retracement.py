@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 import pandas as pd
 import pytest
 
-from src.core_v1_dealing_range import DealingRangeContext, DealingRangeStatus
+from src.core_v1_dealing_range import (
+    DealingRangeContext,
+    DealingRangeStatus,
+    build_dealing_range_context,
+)
 from src.core_v1_displacement import (
     CoreV1DisplacementAssessment,
     CoreV1DisplacementObservation,
@@ -106,6 +111,108 @@ class Fixture:
     zone: CoreV1FVGObservation
     interaction: CoreV1ZoneInteraction
     planned_entry: CoreV1PlannedEntry
+
+
+def governed_directional_evidence(
+    inputs: SubjectVisibleInputs,
+    direction: Direction,
+    *,
+    before: pd.Timestamp,
+) -> tuple[DealingRangeContext, CoreV1LiquidityLevel]:
+    observations = tuple(
+        item
+        for item in inputs.base_observations
+        if item.timing.event_timestamp < before
+        and item.timing.availability_timestamp < before
+    )
+    highs = tuple(
+        (float(item.value["high"]), item)
+        for item in observations
+        if isinstance(item.value, Mapping) and "high" in item.value
+    )
+    lows = tuple(
+        (float(item.value["low"]), item)
+        for item in observations
+        if isinstance(item.value, Mapping) and "low" in item.value
+    )
+    high, high_observation = max(highs, key=lambda item: item[0])
+    low, low_observation = min(lows, key=lambda item: item[0])
+    high_source = high_observation.timing.source_observations[0]
+    low_source = low_observation.timing.source_observations[0]
+    anchor_high_time = high_observation.timing.event_timestamp
+    anchor_low_time = low_observation.timing.event_timestamp
+    event_time = max(anchor_high_time, anchor_low_time)
+    context_sources = (
+        (high_source,)
+        if high_source == low_source
+        else (high_source, low_source)
+    )
+    context = DealingRangeContext(
+        subject=inputs.subject,
+        status=DealingRangeStatus.RESOLVED,
+        availability_timestamp=max(source.availability_timestamp for source in context_sources),
+        event_timestamp=event_time,
+        confirmation_timestamp=event_time,
+        dealing_range=DealingRange(
+            anchor_high_timestamp=anchor_high_time,
+            anchor_high=high,
+            anchor_low_timestamp=anchor_low_time,
+            anchor_low=low,
+            equilibrium=(high + low) / 2,
+        ),
+        provenance=context_sources,
+        reason="Explicit synthetic range anchors for test fixture.",
+    )
+    expected_side = (
+        LiquiditySide.BSL
+        if direction is Direction.BULLISH
+        else LiquiditySide.SSL
+    )
+    visible_levels = detect_core_v1_liquidity_levels(inputs)
+    levels = tuple(
+        level
+        for level in visible_levels
+        if level.side is expected_side
+        and level.timing.availability_timestamp < before
+    )
+    if not levels:
+        raise AssertionError(f"fixture has no visible {expected_side.value} liquidity level")
+    draw = min(levels, key=lambda level: level.level_id)
+    return context, draw
+
+
+def with_visible_ssl_swing(inputs: SubjectVisibleInputs) -> SubjectVisibleInputs:
+    pivot_time = ts("2026-01-01T10:00:30Z")
+    observations = tuple(
+        replace(
+            item,
+            value={**item.value, "low": min(float(item.value["low"]), 95.0)},
+        )
+        if item.timing.event_timestamp == pivot_time
+        and isinstance(item.value, Mapping)
+        else item
+        for item in inputs.base_observations
+    )
+    if observations == inputs.base_observations:
+        raise AssertionError("expected a visible source bar for the synthetic SSL swing")
+    return replace(inputs, base_observations=observations)
+
+
+def with_visible_late_ssl_swing(inputs: SubjectVisibleInputs) -> SubjectVisibleInputs:
+    pivot_time = ts("2026-01-01T10:02:30Z")
+    observations = tuple(
+        replace(
+            item,
+            value={**item.value, "low": min(float(item.value["low"]), 80.0)},
+        )
+        if item.timing.event_timestamp == pivot_time
+        and isinstance(item.value, Mapping)
+        else item
+        for item in inputs.base_observations
+    )
+    if observations == inputs.base_observations:
+        raise AssertionError("expected a visible source bar for the synthetic late SSL swing")
+    return replace(inputs, base_observations=observations)
 
 
 def make_fixture() -> Fixture:
@@ -339,10 +446,17 @@ class FixedEntryResolver:
 
 
 def evaluate(fixture: Fixture, **overrides):
+    context, draw_on_liquidity = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     args = {
         "mss": fixture.mss,
         "liquidity": fixture.liquidity,
         "displacement": fixture.displacement,
+        "context": context,
+        "draw_on_liquidity": draw_on_liquidity,
         "zone": fixture.zone,
         "interaction": fixture.interaction,
     }
@@ -374,6 +488,187 @@ def test_valid_governed_entry_is_planned_only_and_preserves_evidence():
     assert result.provenance["zone_interaction"] == fixture.interaction.timing.source_observations
     assert result.provenance["entry_resolver"] == fixture.planned_entry.timing.source_observations
     assert resolver.received.visible_inputs is fixture.inputs
+    assert result.context.status is DealingRangeStatus.RESOLVED
+    assert result.draw_on_liquidity.side is (
+        LiquiditySide.BSL
+        if fixture.displacement.observation.direction is Direction.BULLISH
+        else LiquiditySide.SSL
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"context": None}, "resolved dealing-range context is required"),
+        ({"draw_on_liquidity": None}, "explicit draw-on-liquidity evidence is required"),
+    ],
+)
+def test_missing_directional_context_or_draw_blocks_entry_resolver(overrides, reason):
+    fixture = make_fixture()
+    resolver = FixedEntryResolver(fixture.planned_entry)
+
+    result = evaluate(fixture, resolver=resolver, **overrides)
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert reason in result.reason
+    assert result.planned_entry is None
+    assert resolver.received is None
+
+
+def test_draw_on_liquidity_conflicting_with_direction_blocks_entry_resolver():
+    fixture = make_fixture()
+    fixture.inputs = with_visible_ssl_swing(fixture.inputs)
+    context, draw = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    conflicting_draw = min(
+        (
+            level
+            for level in detect_core_v1_liquidity_levels(fixture.inputs)
+            if level.side is not draw.side
+        ),
+        key=lambda level: level.level_id,
+    )
+    resolver = FixedEntryResolver(fixture.planned_entry)
+
+    result = evaluate(
+        fixture,
+        resolver=resolver,
+        context=context,
+        draw_on_liquidity=conflicting_draw,
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert "draw-on-liquidity conflicts" in result.reason
+    assert result.planned_entry is None
+    assert resolver.received is None
+
+
+def test_unresolved_range_context_blocks_entry_and_retains_directional_provenance():
+    fixture = make_fixture()
+    unresolved_context = build_dealing_range_context(fixture.inputs)
+    _, draw_on_liquidity = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    resolver = FixedEntryResolver(fixture.planned_entry)
+
+    result = evaluate(
+        fixture,
+        context=unresolved_context,
+        draw_on_liquidity=draw_on_liquidity,
+        interaction=None,
+        resolver=resolver,
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert "resolved dealing-range context is required" in result.reason
+    assert result.provenance["context"] == unresolved_context.provenance
+    assert result.provenance["draw_on_liquidity"] == draw_on_liquidity.timing.source_observations
+    assert resolver.received is None
+
+
+def test_range_anchor_provenance_must_support_both_declared_anchor_times():
+    fixture = make_fixture()
+    context, draw = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    unsupported = replace(context, provenance=context.provenance[:1])
+
+    with pytest.raises(ValueError, match="anchors must be supported"):
+        evaluate(fixture, context=unsupported, draw_on_liquidity=draw)
+
+
+def test_range_context_available_only_after_liquidity_event_blocks_entry():
+    fixture = make_fixture()
+    context, draw = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    late_context = replace(
+        context,
+        availability_timestamp=fixture.subject.availability_timestamp,
+    )
+    resolver = FixedEntryResolver(fixture.planned_entry)
+
+    result = evaluate(
+        fixture,
+        context=late_context,
+        draw_on_liquidity=draw,
+        resolver=resolver,
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert "context must be available before the liquidity event" in result.reason
+    assert resolver.received is None
+
+
+def test_late_visible_draw_level_cannot_retroactively_define_context():
+    fixture = make_fixture()
+    inputs = with_visible_late_ssl_swing(fixture.inputs)
+    context, _ = governed_directional_evidence(
+        inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    late_draw = min(
+        (
+            level
+            for level in detect_core_v1_liquidity_levels(inputs)
+            if level.side is LiquiditySide.SSL
+            and level.timing.availability_timestamp
+            >= fixture.liquidity.breach.timing.event_timestamp
+        ),
+        key=lambda level: level.level_id,
+    )
+    resolver = FixedEntryResolver(fixture.planned_entry)
+
+    result = evaluate_core_v1_retracement(
+        inputs,
+        mss=fixture.mss,
+        liquidity=fixture.liquidity,
+        displacement=fixture.displacement,
+        context=context,
+        draw_on_liquidity=late_draw,
+        zone=fixture.zone,
+        interaction=fixture.interaction,
+        resolver=resolver,
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert "draw-on-liquidity must be available before" in result.reason
+    assert resolver.received is None
+
+
+def test_valid_result_constructor_rejects_missing_or_conflicting_directional_evidence():
+    fixture = make_fixture()
+    result = evaluate(fixture, resolver=FixedEntryResolver(fixture.planned_entry))
+    assert result.state is PrecisionState.VALID
+
+    with pytest.raises(ValueError, match="resolved dealing-range context"):
+        replace(result, context=None)
+    with pytest.raises(ValueError, match="explicit draw-on-liquidity"):
+        replace(result, draw_on_liquidity=None)
+    assert result.draw_on_liquidity is not None
+    conflicting_draw = CoreV1LiquidityLevel(
+        subject=result.draw_on_liquidity.subject,
+        level_id="conflicting-result-draw",
+        side=(
+            LiquiditySide.SSL
+            if result.draw_on_liquidity.side is LiquiditySide.BSL
+            else LiquiditySide.BSL
+        ),
+        price=result.draw_on_liquidity.price,
+        timing=result.draw_on_liquidity.timing,
+    )
+    with pytest.raises(ValueError, match="aligned with displacement direction"):
+        replace(result, draw_on_liquidity=conflicting_draw)
 
 
 @pytest.mark.parametrize(
@@ -814,7 +1109,10 @@ def test_contract_does_not_import_or_invoke_tick_execution():
 
 def test_premium_discount_or_wick_only_context_does_not_create_entry():
     fixture = make_fixture()
-    context_source = fixture.sources["point"]
+    context_sources = (
+        fixture.sources["point"],
+        fixture.sources["fvg-first"],
+    )
     context = DealingRangeContext(
         subject=fixture.subject,
         status=DealingRangeStatus.RESOLVED,
@@ -827,7 +1125,7 @@ def test_premium_discount_or_wick_only_context_does_not_create_entry():
             100.0,
             110.0,
         ),
-        provenance=(context_source,),
+        provenance=context_sources,
         reference_price=105.0,
         location=RangeLocation.DISCOUNT,
     )
@@ -927,11 +1225,18 @@ def test_fvg_touch_at_mss_confirmation_is_not_a_post_mss_retracement():
 
 def test_entry_resolver_cannot_bypass_missing_visible_zone_interaction():
     fixture = make_fixture()
+    context, draw_on_liquidity = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     result = evaluate_core_v1_retracement(
         fixture.inputs,
         mss=fixture.mss,
         liquidity=fixture.liquidity,
         displacement=fixture.displacement,
+        context=context,
+        draw_on_liquidity=draw_on_liquidity,
         zone=fixture.zone,
         interaction=None,
         resolver=FixedEntryResolver(fixture.planned_entry),
@@ -944,6 +1249,11 @@ def test_entry_resolver_cannot_bypass_missing_visible_zone_interaction():
 
 def test_experimental_first_touch_close_back_out_yields_planned_price_not_fill():
     fixture = make_fixture()
+    context, draw_on_liquidity = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     interaction = derive_visible_fvg_interaction(
         fixture.inputs,
         fixture.zone,
@@ -955,6 +1265,8 @@ def test_experimental_first_touch_close_back_out_yields_planned_price_not_fill()
         mss=fixture.mss,
         liquidity=fixture.liquidity,
         displacement=fixture.displacement,
+        context=context,
+        draw_on_liquidity=draw_on_liquidity,
         zone=fixture.zone,
         interaction=interaction,
         resolver=FirstTouchFVGRejectionEntryResolver(),
@@ -1031,6 +1343,11 @@ def test_experimental_first_touch_supports_bearish_fvg_far_edge():
 
 def test_supplied_interaction_at_mss_confirmation_cannot_qualify_entry():
     fixture = make_fixture()
+    context, draw_on_liquidity = governed_directional_evidence(
+        fixture.inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
     zone_sources = fixture.zone.timing.source_observations
     interaction_source = fixture.sources["follow-through"]
     early_interaction = CoreV1ZoneInteraction(
@@ -1048,6 +1365,8 @@ def test_supplied_interaction_at_mss_confirmation_cannot_qualify_entry():
         mss=fixture.mss,
         liquidity=fixture.liquidity,
         displacement=fixture.displacement,
+        context=context,
+        draw_on_liquidity=draw_on_liquidity,
         zone=fixture.zone,
         interaction=early_interaction,
         resolver=FixedEntryResolver(fixture.planned_entry),

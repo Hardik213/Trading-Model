@@ -4,6 +4,15 @@
 **Date:** 2026-10-20
 **Scope:** Detect a post-MSS interaction with a resolved FVG candidate and apply an experimental entry trigger. This policy is not performance-tested or frozen for evaluation.
 
+## Directional context and liquidity draw gate
+
+- A planned entry requires a resolved dealing-range context with visible, point-in-time anchor provenance. The range-anchor policy remains caller-governed; the default unavailable resolver does not infer a range.
+- A planned entry also requires an explicit governed draw-on-liquidity level. The default pipeline does not guess which visible level is the directional objective.
+- Both context and draw evidence must be available strictly before the liquidity-breach event; later evidence cannot retroactively define the setup's original context. The draw must recompute from visible swings.
+- The draw side must agree with displacement direction: bullish displacement requires buy-side liquidity (BSL), and bearish displacement requires sell-side liquidity (SSL). Missing, unresolved, late, or conflicting evidence returns `DEVELOPING` before the entry resolver is called.
+- Validate context and draw provenance against the same `ReplaySubject`, enforce their availability cutoffs, and preserve both in planned-entry provenance. A `VALID` retracement result cannot omit them.
+- Premium/discount location alone does not establish the directional thesis. No range anchor, liquidity objective, or session policy is inferred from that classification.
+
 ## Interaction rule
 
 - Consider base-timeframe bars strictly after both the FVG's availability timestamp and MSS confirmation event. The formation, confirmation, and pre-MSS bars cannot count as a retracement.
@@ -21,4 +30,4 @@
 - The planned entry reference is the trigger bar close. It is a plan price, not an exact fill. The decision is available only with its visible evidence; tick execution remains strictly later than the decision availability.
 - This operational trigger is an experimental strategy choice because the source documents require an entry condition but do not select this particular trigger. It is recorded for future review and must not be treated as an active, performance-supported rule.
 
-Neither the interaction detector nor the experimental trigger authorizes replay evaluation or access to sealed 2025 outcomes.
+Neither the interaction detector nor the experimental trigger authorizes replay evaluation or access to sealed 2025 outcomes. The new directional-context and draw gate is a development contract change, not a frozen evaluation build.
