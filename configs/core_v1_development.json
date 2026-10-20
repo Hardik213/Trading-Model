@@ -35,14 +35,32 @@
     "retracement_entry": {
       "interaction": "FIRST_VISIBLE_POST_MSS_FVG_OVERLAP",
       "exact_touch_price": "NOT_INFERRED",
-      "entry_rule_id": "E008-20261020-FIRST-TOUCH-FVG-REJECTION",
-      "entry_rule_status": "EXPERIMENTAL_NOT_ACCEPTED_OR_PERFORMANCE_EVALUATED",
+      "entry_rule_id": "E009-20261020-FVG-DRT-QUARTER-REJECTION",
+      "entry_rule_status": "OWNER_SPECIFIED_DEVELOPMENT_HYPOTHESIS_NOT_PERFORMANCE_EVALUATED",
       "planned_entry_is_fill": false
     },
     "lifetime_implementation": "DEFERRED_TRADING_TIME_REQUIRED",
     "breached_without_rejection_consumption": "UNRESOLVED",
     "dealing_range_anchor_policy": "CALLER_GOVERNED_UNRESOLVED_FOR_FREEZE",
-    "strategy_session_gate": "BLOCKED_PENDING_DST_AWARE_POLICY"
+    "strategy_session_gate": {
+      "status": "IMPLEMENTED_DEVELOPMENT_ONLY",
+      "timezone": "America/New_York",
+      "interval_convention": "[START_INCLUSIVE, END_EXCLUSIVE)",
+      "entry_timestamp_basis": "PLANNED_ENTRY_EVENT_TIMESTAMP",
+      "windows_local": [
+        {
+          "session": "LONDON_ICT_KILLZONE_PLUS_PRECEDING_HOUR",
+          "start": "01:00",
+          "end": "05:00"
+        },
+        {
+          "session": "NEW_YORK_ICT_KILLZONE_PLUS_PRECEDING_HOUR",
+          "start": "06:00",
+          "end": "10:00"
+        }
+      ],
+      "open_trade_management_after_window": "NORMAL_TP_SL"
+    }
   },
   "execution_configuration": {
     "mode": "HISTORICAL_TICK_SIMULATION_ONLY",
@@ -59,12 +77,11 @@
     "live_broker_enabled": false
   },
   "freeze_blockers": [
-    "Owner decision required to accept, replace, or reject the experimental E008 entry trigger.",
     "Trading-time liquidity lifetime requires a verified XAUUSD trading calendar and implementation.",
     "Consumption behavior for a breached but unrejected liquidity level remains unresolved.",
     "A deterministic dealing-range anchor policy is not selected.",
     "Daily and H4 boundary convention remains pending timezone-aware verification.",
-    "A DST-aware session policy is not implemented; session-filtered experiments remain blocked.",
+    "The session gate is a development implementation only; verify the IANA timezone database in the frozen runtime before any evaluation.",
     "Execution configuration requires confirmed account currency, contract size, quantity rules, conversion policy, commission, and slippage.",
     "Starting equity and exact run-time execution configuration are not recorded.",
     "No frozen strategy configuration hash, clean frozen build record, or run environment record exists.",

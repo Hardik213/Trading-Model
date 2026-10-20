@@ -49,6 +49,7 @@ from .core_v1_retracement import (
     derive_visible_fvg_interaction,
     evaluate_core_v1_retracement,
 )
+from .core_v1_sessions import core_v1_entry_session
 from .evidence_timing import (
     EvidenceSourceObservation,
     SubjectEvidence,
@@ -607,6 +608,35 @@ def evaluate_core_v1_pipeline(
         ),
     )
     if entry.state is not PrecisionState.VALID:
+        return _incomplete(
+            inputs,
+            context,
+            entry.reason,
+            draw_on_liquidity=draw_on_liquidity,
+            opposing_liquidity_levels=opposing_liquidity_levels,
+            liquidity=liquidity,
+            displacement=displacement,
+            mss=mss,
+            zone=zone,
+            interaction=interaction,
+            retracement=entry,
+        )
+
+    assert entry.planned_entry is not None
+    if core_v1_entry_session(entry.planned_entry.timing.event_timestamp) is None:
+        entry = replace(
+            entry,
+            state=PrecisionState.DEVELOPING,
+            reason=(
+                "The planned-entry event is outside the configured ICT session "
+                "windows or New York timezone data is unavailable."
+            ),
+            planned_entry=None,
+            provenance={
+                **entry.provenance,
+                "session_gate": (),
+            },
+        )
         return _incomplete(
             inputs,
             context,
