@@ -26,7 +26,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/status.json":
-            write_status_file(ROOT / "status.json")
             payload = json.dumps(get_dashboard_snapshot()).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -34,12 +33,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if self.path not in {"/", "/index.html"}:
+            self.send_error(404)
+            return
         return super().do_GET()
 
 
 if __name__ == "__main__":
-    write_status_file(ROOT / "status.json")
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), DashboardHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), DashboardHandler)
     print(f"Dashboard available at http://localhost:{PORT}")
     try:
         server.serve_forever()

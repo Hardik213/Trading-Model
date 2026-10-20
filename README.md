@@ -1,68 +1,27 @@
-# AI Trader Starter
+# XAUUSD Core v1 Research System
 
-A lightweight Python trading bot template designed for market research and paper trading. It combines technical feature engineering with a simple probabilistic signal model.
+This repository is developing a point-in-time-correct implementation of the ICT 2022 Core v1 setup pipeline for XAUUSD. It records visible evidence and provenance through liquidity, displacement, MSS, retracement, invalidation, and opposing-liquidity target stages. A setup with missing, conflicting, late, or unsupported evidence must remain unresolved.
 
-## What it does
+## Current status
 
-- Loads market data for a symbol such as XAUUSD
-- Creates technical features such as RSI, MACD, ATR, volatility, range, and trend strength
-- Trains a logistic-regression signal model from historical data
-- Runs a simple backtest with risk controls and drawdown monitoring
-- Provides a paper-trading entry point for a live-friendly workflow
+- The Core v1 research pipeline and tick-execution integration are under development.
+- The first-touch FVG close-back-out entry rule is experimental and has not been evaluated or frozen.
+- The default application launcher and dashboard are disabled because the older probabilistic bot trains on outcome labels, can summarize historical results, and does not implement the governed Core v1 pipeline.
+- No backtest or strategy evaluation is authorized until the frozen-build gates in `docs/evaluation_protocol.md` are satisfied. Keep the 2025 holdout sealed.
+- Broker sizing and live execution remain unavailable until the actual Octa account and XAUUSD contract specifications are confirmed and configured.
 
-## Quick start
+## Repository map
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python main.py
-```
+- `src/core_v1_*.py` implements the evidence-gated setup pipeline.
+- `src/core_v1_tick_execution.py` connects visible replay decisions to quote-based execution simulation.
+- `src/tick_execution.py` contains execution records and explicit execution configuration.
+- `docs/core_v1_*_contract.md` records current development contracts and unresolved rules.
+- `docs/evaluation_protocol.md` governs model freeze and any future evaluation.
+- `docs/strategy_variant_log.csv` is the append-only development and experiment record.
+- `data/raw/` is local input data and is not committed to Git.
 
-## Reproducible canonical datasets
+## Verification
 
-Canonical raw data is resolved from `TRADING_DATA_ROOT`, which must point to
-the directory containing `dukascopy/` and
-`external_secondary/octa_mt4/XAU_15m_data.csv`. Without the variable, the
-default is this repository's `data/raw` directory. Relative overrides are
-resolved from the repository root. For example, in PowerShell:
+Use focused synthetic Core v1 tests while implementation work continues. Do not run market replays, outcome calculations, performance reports, or charts before the evaluation protocol gates pass. The broad verification script runs the full repository suite, which includes historical census and outcome-oriented checks; it is not a safe substitute for focused synthetic tests during this development stage.
 
-```powershell
-$env:TRADING_DATA_ROOT = 'C:\TWS\New - test\data\raw'
-python scripts\verify.py
-```
-
-The verifier streams the canonical files, checks the pinned manifest at
-`data/dataset_manifest.json`, runs the full test suite, and checks
-`git diff --check`. The manifest aggregate is SHA-256 over UTF-8 JSON with
-sorted keys, compact separators, and no `aggregate_sha256` field; its file
-entries are sorted by relative path and contain no machine-specific paths.
-Raw datasets remain ignored by Git. Dataset-dependent tests skip with an
-explicit diagnostic only when data is not configured; a missing file under a
-configured data root fails the test.
-
-## Demo mode
-
-By default, the app generates synthetic OHLCV data so it can run without external subscriptions or local CSV files.
-
-## Important disclaimer
-
-This project is for research and education. It is not financial advice and should not be used for live deployment without extensive validation and risk review.
-
-## Project structure
-
-- `main.py` - entry point
-- `src/data_loader.py` - data sourcing and synthetic generation
-- `src/features.py` - technical indicator construction
-- `src/models.py` - signal model training and scoring
-- `src/backtest.py` - risk-aware backtesting loop
-- `src/paper_trader.py` - execution and monitoring wrapper
-- `config.yaml` - configuration
-
-## Customization ideas
-
-- Replace the synthetic feed with broker or exchange data
-- Add more features and ensemble models
-- Add execution rules and order management
-- Add regression tests and validation pipelines
-- Connect to a broker or API layer
+The Core v1 tick runner is a library integration and does not yet have a frozen, user-facing run configuration. `python main.py` exits with a disabled-runner message; `python portal.py` serves a disabled status snapshot without reading market data or writing a result file.

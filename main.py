@@ -4,8 +4,10 @@ from src.paper_trader import PaperTrader
 
 
 def main() -> None:
-    trader = PaperTrader()
-    trader.run()
+    try:
+        PaperTrader().run()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

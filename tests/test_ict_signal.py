@@ -4,34 +4,9 @@ from unittest.mock import patch
 import pandas as pd
 
 from src.data_loader import load_market_data
-from src.paper_trader import PaperTrader
 
 
 class TestICTSignal(unittest.TestCase):
-    def test_ict_long_setup_is_allowed_when_htf_liquidity_raid_and_mss_match(self):
-        trader = PaperTrader(config_path='config.yaml')
-        row = pd.Series({
-            'regime_bias': 1.0,
-            'macro_bias': 1.0,
-            'session_bias': 1.0,
-            'liquidity_sweep': -1.0,
-            'sma_fast': 100.0,
-            'sma_slow': 90.0,
-            'is_entry_session': True,
-            'htf_high_24': 101.0,
-            'htf_low_24': 95.0,
-            'htf_liquidity_obj': 101.0,
-            'liquidity_raid_long': True,
-            'displacement': 1.8,
-            'mss_bull': True,
-            'pd_array_long': True,
-            'rr_ratio': 2.0,
-            'structure_valid_long': True,
-        })
-
-        signal = trader._compose_signal(row, 0.80)
-        self.assertEqual(signal, 1)
-
     def test_live_market_data_is_preferred_when_available(self):
         live_df = pd.DataFrame([
             {"Open": 2348.0, "High": 2350.0, "Low": 2347.0, "Close": 2349.0, "Volume": 1200},
