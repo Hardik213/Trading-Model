@@ -209,6 +209,43 @@ def test_batch_and_incremental_snapshots_match_within_declared_window():
         pd.testing.assert_frame_equal(batch_base, incremental_base, check_dtype=False)
         pd.testing.assert_frame_equal(batch_context, incremental_context, check_dtype=False)
 
+
+def test_incremental_replay_respects_half_open_start_and_end_boundaries():
+    start = _ts("2026-01-01T00:01:00Z")
+    end = _ts("2026-01-01T00:02:00Z")
+    just_before_end = end - pd.Timedelta(nanoseconds=1)
+    replay = IncrementalHistoricalReplay(
+        config=ReplayConfig(
+            timeframe="1min",
+            source="TEST",
+            start=start,
+            end=end,
+        ),
+        history_limits={"1min": 8},
+        max_pending_groups=4,
+        max_pending_bars=8,
+    )
+    decision_times = []
+    for available_at in (start, just_before_end, end):
+        bar_time = available_at - pd.Timedelta(minutes=1)
+        replay.feed_group(
+            _group(
+                available_at.isoformat(),
+                **{
+                    "1min": (
+                        _bar(bar_time.isoformat(), available_at.isoformat()),
+                    )
+                },
+            )
+        )
+        result = replay.process_next(_observation)
+        if result is not None:
+            decision_times.append(result.timestamp)
+    replay.finish()
+
+    assert decision_times == [start, just_before_end]
+
+
 def test_multiple_decisions_for_atomic_group_with_multiple_bars_and_timeframes():
     replay = _replay()
     timestamp = "2026-01-01T00:07:00Z"

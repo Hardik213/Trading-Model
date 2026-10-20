@@ -107,7 +107,7 @@ These are fixed UTC reporting labels, not claims about daylight-saving-adjusted 
 
 ### Runtime gates before evaluation
 
-The protocol's half-open period convention is not yet verified end-to-end by the replay implementation. `eligible_decision_times()` currently includes a supplied `end` timestamp (`<= end`); **the `[start, end)` runtime gate is BLOCKED** until an explicit boundary regression test passes against the replay entry point. Do not use replay output for period evaluation before that gate is resolved.
+The `[start, end)` runtime boundary is verified at the batch, incremental, and tick-replay entry points. `eligible_decision_times()` includes timestamps at `start`, excludes timestamps at `end`, and adjacent windows process a shared timestamp only in the later window. Evidence: `tests/test_replay_engine.py::test_eligible_decision_times_excludes_end_boundary`, `tests/test_replay_engine.py::test_adjacent_replay_windows_process_shared_boundary_once`, `tests/test_incremental_replay.py::test_incremental_replay_respects_half_open_start_and_end_boundaries`, and `tests/test_tick_execution_replay.py::test_raw_ticks_are_clipped_to_half_open_replay_window` / `test_shared_window_boundary_is_excluded_then_included_once`. This records runtime verification only; it does not authorize a strategy replay or evaluation.
 
 The reporting buckets above are fixed UTC reporting labels, not DST-aware market sessions. **Session-filtered experiments are BLOCKED** until a timezone-aware, daylight-saving-aware session policy is separately specified, implemented, tested, and frozen. Do not interpret the current hour-bucket code as DST-correct market-session logic.
 
