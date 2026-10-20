@@ -12,6 +12,7 @@ from src.core_v1_decision_bridge import (
 from src.ict2022_engine import SetupState
 from src.sniper_setup import PrecisionState
 from src.tick_execution import DecisionRecord, ExecutionDirection, ExecutionEngine
+import src.core_v1_pipeline as pipeline_module
 from src.replay_subject import ReplaySubject
 from tests.test_core_v1_pipeline import evaluate, pipeline_fixture
 from tests.test_core_v1_retracement import FixedEntryResolver
@@ -58,6 +59,12 @@ def quantity(value=0.75):
         source_id="risk-service-approved-quantity",
         provenance={"provider": "governed-downstream", "approval_id": "q-17"},
     )
+
+
+@pytest.fixture(autouse=True)
+def allow_legacy_synthetic_fixture_session(monkeypatch):
+    """Keep bridge fixtures focused on bridge contracts, not session timing."""
+    monkeypatch.setattr(pipeline_module, "core_v1_entry_session", lambda _: "LONDON")
 
 
 def test_valid_pipeline_and_explicit_quantity_create_actionable_market_decision():

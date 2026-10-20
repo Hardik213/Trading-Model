@@ -14,6 +14,7 @@ from src.core_v1_mss import (
     evaluate_core_v1_mss,
 )
 from src.core_v1_pipeline import evaluate_core_v1_pipeline
+from src.core_v1_sessions import core_v1_entry_session
 from src.core_v1_reactionary_zones import (
     CoreV1OrderBlockObservation,
     FVGResult,
@@ -242,6 +243,12 @@ def evaluate(kwargs, **overrides):
     return evaluate_core_v1_pipeline(**arguments)
 
 
+@pytest.fixture(autouse=True)
+def allow_legacy_synthetic_fixture_session(monkeypatch):
+    """Keep pre-session synthetic fixtures focused on their existing contracts."""
+    monkeypatch.setattr(pipeline_module, "core_v1_entry_session", lambda _: "LONDON")
+
+
 def _visible_price_at(inputs, timestamp, field):
     (observation,) = tuple(
         observation
@@ -280,6 +287,66 @@ def test_complete_governed_pipeline_preserves_all_stages_and_timing():
     for name, sources in result.hypothesis.provenance.items():
         assert result.provenance[name] == sources
     assert set(result.hypothesis.provenance).issubset(result.provenance)
+
+
+def test_valid_planned_entry_inside_owner_session_window_reaches_hypothesis(monkeypatch):
+    # The shared fixture is intentionally synthetic and predates the session
+    # policy; model an otherwise-valid entry inside the selected window here.
+    monkeypatch.setattr(pipeline_module, "core_v1_entry_session", lambda _: "NEW_YORK")
+    _, kwargs = pipeline_fixture()
+
+    result = evaluate(kwargs)
+
+    assert result.retracement is not None
+    assert result.retracement.planned_entry is not None
+    assert result.hypothesis is not None
+    assert result.hypothesis.state is PrecisionState.VALID
+
+
+def test_planned_entry_at_session_end_is_blocked_before_hypothesis(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "core_v1_entry_session", core_v1_entry_session)
+    fixture, kwargs = pipeline_fixture()
+    source = replace(
+        fixture.sources["entry-resolver"],
+        event_timestamp=ts("2026-01-01T10:06:10Z"),
+        availability_timestamp=ts("2026-01-01T10:06:10Z"),
+        base_bar_timestamp=None,
+        is_base_timeframe=False,
+    )
+    entry_timing = replace(
+        kwargs["entry_resolver"].result.timing,
+        event_timestamp=source.event_timestamp,
+        source_observations=tuple(
+            source if item.source_id == fixture.sources["entry-resolver"].source_id else item
+            for item in kwargs["entry_resolver"].result.timing.source_observations
+        ),
+    )
+    inputs = replace(
+        kwargs["inputs"],
+        context_observations=tuple(kwargs["inputs"].context_observations)
+        + (
+            SubjectVisibleObservation(
+                value={"source_id": source.source_id},
+                timing=EvidenceTiming.from_inputs(
+                    event_timestamp=source.event_timestamp,
+                    source_observations=(source,),
+                    base_bar_scoped=False,
+                ),
+                scope=ObservationScope.CONTEXT,
+            ),
+        ),
+    )
+    planned = replace(kwargs["entry_resolver"].result, timing=entry_timing)
+
+    result = evaluate(
+        {**kwargs, "inputs": inputs, "entry_resolver": FixedEntryResolver(planned)},
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.hypothesis is None
+    assert result.retracement is not None
+    assert result.retracement.planned_entry is None
+    assert "outside the configured ICT session" in result.reason
 
 
 def test_target_breach_eligibility_uses_only_observations_available_at_planned_entry():

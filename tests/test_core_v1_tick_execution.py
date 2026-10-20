@@ -20,7 +20,9 @@ from src.core_v1_pipeline import CoreV1PipelineResult
 from src.core_v1_pipeline import evaluate_core_v1_pipeline
 from src.core_v1_displacement import DisplacementStatus
 import src.core_v1_tick_execution as tick_execution_module
+import src.core_v1_pipeline as pipeline_module
 from src.core_v1_tick_execution import CoreV1TickExecution
+from src.core_v1_sessions import core_v1_entry_session
 from src.displacement import Direction
 from src.evidence_timing import EvidenceTiming
 from src.ict2022_engine import SetupState
@@ -195,6 +197,12 @@ def integration(
         quantity_provider=quantity_provider,
         order_type=order_type,
     )
+
+
+@pytest.fixture(autouse=True)
+def allow_legacy_synthetic_fixture_session(monkeypatch):
+    """Keep existing execution fixtures focused on lifecycle, not session policy."""
+    monkeypatch.setattr(pipeline_module, "core_v1_entry_session", lambda _: "LONDON")
 
 
 def delayed_aggregator(interval, release_at):
@@ -814,6 +822,46 @@ def test_end_to_end_fill_uses_later_actual_ask_not_planned_entry_and_exits_on_bi
     assert result.exit_fill.side == "BID"
     assert result.exit_fill.timestamp == ts("2026-01-01T10:08:02Z")
     assert result.exit_fill.observed_price == 116.25
+
+
+def test_session_close_does_not_force_close_open_position():
+    source_kwargs, template = template_fixture()
+
+    # The position is opened before the New York window closes and exits later;
+    # session eligibility applies to entry, not ongoing TP/SL management.
+    decision_time = ts("2026-01-01T14:59:00Z")
+    assert core_v1_entry_session(decision_time) == "NEW_YORK"
+    assert core_v1_entry_session(ts("2026-01-01T15:00:00Z")) is None
+
+    instance = integration(
+        pipeline_builder=lambda inputs: rebind_subject(
+            template,
+            template.subject,
+            inputs.subject,
+        ),
+        evidence_enricher=lambda inputs: add_fixture_evidence(
+            inputs,
+            source_kwargs["inputs"],
+        ),
+        quantity_provider=lambda _: CoreV1QuantityInput(0.1, "session-close-test"),
+        allow_custom_pipeline_builder=True,
+        pipeline_builder_identity=(
+            "tests.test_core_v1_tick_execution.test_session_close_management"
+        ),
+    )
+
+
+    report = instance.run(
+        [
+            tick("2026-01-01T14:58:00Z", 0),
+            tick("2026-01-01T14:59:00Z", 1),
+            tick("2026-01-01T15:00:00Z", 2, 104.0, 104.5),
+            tick("2026-01-01T15:01:00Z", 3, 116.25, 116.5),
+        ]
+    )
+
+    assert report.execution_results[0].status is ExecutionStatus.CLOSED
+    assert report.execution_results[0].exit_fill.timestamp == ts("2026-01-01T15:01:00Z")
 
 
 def test_decision_tick_and_same_timestamp_later_source_order_tick_cannot_fill():
