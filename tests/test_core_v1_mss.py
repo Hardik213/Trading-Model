@@ -1334,6 +1334,46 @@ def test_visible_mss_requires_sweep_classification_not_just_rejection():
     assert result.structural_break is None
 
 
+def test_visible_mss_equal_high_does_not_qualify_as_strict_structural_point():
+    inputs, sources = visible_inputs()
+    inputs = _with_bar_values(
+        inputs,
+        sources["level-left-1"].event_timestamp,
+        high=105.5,
+    )
+    inputs = _with_bar_values(
+        inputs,
+        sources["point"].event_timestamp,
+        high=105.5,
+    )
+    values = components(inputs, sources)
+
+    result = evaluate_core_v1_mss(
+        inputs,
+        liquidity_event=values["liquidity_event"],
+        displacement=values["displacement"],
+        derive_visible=True,
+    )
+
+    assert result.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert result.structural_point is None
+    assert result.structural_break is None
+
+
+def test_visible_pipeline_equal_low_does_not_qualify_as_strict_structural_point():
+    from src.core_v1_pipeline import evaluate_core_v1_pipeline
+
+    inputs = visible_auto_mss_inputs()
+    equal_low_time = ts("2026-01-01T10:04:00Z")
+    inputs = _with_bar_values(inputs, equal_low_time, low=97.0)
+
+    result = evaluate_core_v1_pipeline(inputs)
+
+    assert result.mss is not None
+    assert result.mss.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert result.mss.structural_point is None
+
+
 
 def test_mss_pivot_window_must_be_available_before_liquidity_breach():
     from src.core_v1_pipeline import evaluate_core_v1_pipeline

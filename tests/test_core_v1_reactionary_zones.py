@@ -77,6 +77,7 @@ def setup(
     current = current or subject()
     sources = sources or (
         source("first", "2026-01-01T10:00:00Z"),
+        source("middle", "2026-01-01T10:02:00Z"),
         source("third", "2026-01-01T10:05:00Z", "2026-01-01T10:06:10Z"),
     )
     inputs = SubjectVisibleInputs(
@@ -122,6 +123,20 @@ def test_governed_fvg_preserves_subject_timing_and_provenance():
     assert result.observation.timing.provenance["reference"] == "fvg-observation"
 
 
+def test_fvg_requires_visible_middle_candle_provenance():
+    current, _, candidate = setup()
+    missing_middle = replace(
+        candidate.timing,
+        source_observations=(
+            candidate.timing.source_observations[0],
+            candidate.timing.source_observations[2],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="three candles"):
+        CoreV1FVGObservation(current, candidate.fvg, missing_middle)
+
+
 @pytest.mark.parametrize(
     ("lower", "upper", "midpoint", "size"),
     [
@@ -157,6 +172,7 @@ def test_later_fvg_confirmation_is_preserved_and_must_be_visible():
     )
     inputs_sources = (
         source("first", "2026-01-01T10:00:00Z"),
+        source("middle", "2026-01-01T10:02:00Z"),
         source("third", "2026-01-01T10:05:00Z"),
         confirmation_source,
     )
@@ -236,7 +252,11 @@ def test_fvg_resolver_requires_visible_source_lineage_and_subject_identity():
     with pytest.raises(ValueError, match="another ReplaySubject"):
         evaluate_core_v1_fvg(inputs, observation=other_candidate)
 
-    hidden = source("hidden", "2026-01-01T10:04:00Z")
+    hidden = replace(
+        source("hidden", "2026-01-01T10:05:30Z"),
+        base_bar_timestamp=None,
+        is_base_timeframe=False,
+    )
     hidden_timing = replace(
         candidate.timing,
         source_observations=candidate.timing.source_observations + (hidden,),

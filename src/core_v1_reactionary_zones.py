@@ -90,6 +90,25 @@ class CoreV1FVGObservation:
             },
             "FVG",
         )
+        first_timestamp = _utc(self.fvg.first_candle_timestamp)
+        third_timestamp = _utc(self.fvg.third_candle_timestamp)
+        formation_sources = tuple(
+            source
+            for source in self.timing.source_observations
+            if first_timestamp <= source.event_timestamp <= third_timestamp
+        )
+        if len(formation_sources) != 3 or len(
+            {source.event_timestamp for source in formation_sources}
+        ) != 3:
+            raise ValueError(
+                "FVG provenance must retain exactly one base source for each of its three candles."
+            )
+        if any(
+            not source.is_base_timeframe
+            or source.base_bar_timestamp != source.event_timestamp
+            for source in formation_sources
+        ):
+            raise ValueError("FVG candle provenance must identify visible base bars.")
 
 
 @dataclass(frozen=True)

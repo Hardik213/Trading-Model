@@ -38,6 +38,7 @@ from src.core_v1_mss import (
 from src.core_v1_reactionary_zones import (
     CoreV1FVGObservation,
     CoreV1OrderBlockObservation,
+    ZoneStatus,
     evaluate_core_v1_fvg,
 )
 from src.core_v1_retracement import (
@@ -107,6 +108,38 @@ def _visible_close_at(inputs: SubjectVisibleInputs, timestamp: pd.Timestamp) -> 
         if item.timing.event_timestamp == timestamp
     )
     return float(observation.value["close"])
+
+
+def with_visible_displacement_fvg(inputs: SubjectVisibleInputs) -> SubjectVisibleInputs:
+    values = {
+        ts("2026-01-01T10:01:30Z"): {
+            "open": 99.0,
+            "high": 100.0,
+            "low": 98.0,
+            "close": 99.0,
+        },
+        ts("2026-01-01T10:02:00Z"): {
+            "open": 101.0,
+            "high": 106.0,
+            "low": 100.0,
+            "close": 105.0,
+        },
+        ts("2026-01-01T10:02:30Z"): {
+            "open": 105.0,
+            "high": 107.0,
+            "low": 101.0,
+            "close": 106.0,
+        },
+    }
+    return replace(
+        inputs,
+        base_observations=tuple(
+            replace(item, value={**item.value, **values[item.timing.event_timestamp]})
+            if item.timing.event_timestamp in values
+            else item
+            for item in inputs.base_observations
+        ),
+    )
 
 
 @dataclass
@@ -418,7 +451,7 @@ def make_fixture() -> Fixture:
     )
     zone_timing = make_timing(
         "2026-01-01T10:04:59Z",
-        (sources["fvg-first"], sources["fvg-third"]),
+        (sources["fvg-first"], sources["displacement"], sources["fvg-third"]),
     )
     zone = CoreV1FVGObservation(current, fvg, zone_timing)
     interaction_sources = (
@@ -1198,6 +1231,47 @@ def test_entry_state_uses_only_existing_four_state_vocabulary():
     assert unresolved.state in PrecisionState
     assert resolved.state in PrecisionState
     assert not hasattr(unresolved, "execution_state")
+
+
+def test_visible_fvg_derivation_requires_displacement_middle_and_preserves_three_sources():
+    fixture = make_fixture()
+    inputs = with_visible_displacement_fvg(fixture.inputs)
+
+    result = evaluate_core_v1_fvg(
+        inputs,
+        displacement=fixture.displacement,
+        mss=fixture.mss,
+        derive_visible=True,
+    )
+
+    assert result.status is ZoneStatus.RESOLVED
+    assert result.observation is not None
+    assert result.observation.fvg.formation_timestamp == ts("2026-01-01T10:02:30Z")
+    assert result.observation.fvg.first_candle_timestamp == ts("2026-01-01T10:01:30Z")
+    assert result.observation.fvg.third_candle_timestamp == ts("2026-01-01T10:02:30Z")
+    assert len(result.observation.timing.source_observations) == 3
+    assert result.observation.timing.provenance["middle_candle_is_displacement"] is True
+
+
+def test_visible_fvg_derivation_fails_closed_on_malformed_ohlc():
+    fixture = make_fixture()
+    inputs = with_visible_displacement_fvg(fixture.inputs)
+    malformed = tuple(
+        replace(item, value={**item.value, "high": "not-a-number"})
+        if item.timing.event_timestamp == ts("2026-01-01T10:02:30Z")
+        else item
+        for item in inputs.base_observations
+    )
+
+    result = evaluate_core_v1_fvg(
+        replace(inputs, base_observations=malformed),
+        displacement=fixture.displacement,
+        mss=fixture.mss,
+        derive_visible=True,
+    )
+
+    assert result.status is ZoneStatus.UNRESOLVED
+    assert result.observation is None
 
 
 def test_visible_fvg_interaction_is_first_post_availability_overlap():
