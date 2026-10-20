@@ -3,7 +3,7 @@
 **Audit date:** 2026-10-20  
 **Branch:** `wip/step3d-recovered`  
 **Starting HEAD:** `f479f0d22b10e1394b9f865271415bbe439a8537`  
-**Latest development updates:** E009 implementation `9e7c5c140b91833017e5a26e43ba28c08831427a`; session trade-management record `44ae64366ca61562b65e6f516772662cb0de67c4`; owner-confirmed session windows implemented in the current development worktree (not yet committed).
+**Latest development updates:** E009 implementation `9e7c5c140b91833017e5a26e43ba28c08831427a`; session trade-management record `44ae64366ca61562b65e6f516772662cb0de67c4`; DST-aware session gate `8d66de9`.
 **Scope:** Engineering readiness review only. No holdout run is authorized. No raw CSV rows, strategy outcomes, performance metrics, charts, replay, backtest, or strategy evaluation was accessed.
 
 ## Stage status
