@@ -867,15 +867,24 @@ def _validate_visible_break_and_follow_through(
     qualifies = lambda close: (
         close > point_price if direction is Direction.BULLISH else close < point_price
     )
-    first_break = next(
-        (
-            timestamp
-            for timestamp, bar in visible_bars
-            if qualifies(bar["close"])
-        ),
-        None,
-    )
     break_index = break_positions[0]
+    break_follow_through_window = visible_bars[break_index + 1 : break_index + 3]
+    if any(
+        not qualifies(candidate_bar["close"])
+        for _, candidate_bar in break_follow_through_window
+    ):
+        raise ValueError("MSS break is invalidated before follow-through confirmation.")
+    first_break = None
+    for candidate_index, (timestamp, bar) in enumerate(visible_bars):
+        if timestamp >= confirmation_timestamp or not qualifies(bar["close"]):
+            continue
+        follow_through_window = visible_bars[
+            candidate_index + 1 : candidate_index + 3
+        ]
+        if any(not qualifies(candidate_bar["close"]) for _, candidate_bar in follow_through_window):
+            continue
+        first_break = timestamp
+        break
     if first_break != break_timestamp:
         raise ValueError("Structural break is not the first visible close beyond the point.")
     break_bar = visible_bars[break_index][1]

@@ -580,6 +580,57 @@ def test_mss_rejects_later_break_when_an_earlier_visible_close_already_broke():
         evaluate(inputs, values)
 
 
+def test_mss_accepts_later_break_after_an_earlier_candidate_is_invalidated():
+    inputs, sources = visible_inputs()
+    inputs = _with_bar_values(
+        inputs,
+        sources["displacement-confirmation"].event_timestamp,
+        close=106.0,
+    )
+    invalidation_source = source("break-invalidation", "2026-01-01T10:02:45Z")
+    invalidation = SubjectVisibleObservation(
+        value={
+            "open": 106.0,
+            "high": 107.0,
+            "low": 103.0,
+            "close": 104.0,
+        },
+        timing=timing(
+            "2026-01-01T10:02:45Z",
+            (invalidation_source,),
+            base_scoped=True,
+        ),
+        scope=ObservationScope.BASE,
+    )
+    inputs = replace(
+        inputs,
+        base_observations=tuple(
+            sorted(
+                (*inputs.base_observations, invalidation),
+                key=lambda observation: observation.timing.event_timestamp,
+            )
+        ),
+    )
+    values = components(inputs, sources)
+    values["confirmation"] = replace(
+        values["confirmation"],
+        timing=replace(
+            values["confirmation"].timing,
+            source_observations=(
+                *values["confirmation"].timing.source_observations,
+                invalidation_source,
+            ),
+        ),
+    )
+
+    result = evaluate(inputs, values)
+
+    assert result.status is MSSStatus.MSS
+    assert result.structural_break.timing.event_timestamp == ts(
+        "2026-01-01T10:03:00Z"
+    )
+
+
 def test_mss_rejects_follow_through_that_does_not_close_beyond_break_extreme():
     inputs, sources = visible_inputs()
     inputs = _with_bar_values(
