@@ -183,12 +183,18 @@ def components(
     point = None
     if point_present:
         point_source = sources["point"]
+        point_confirmation_source = sources["level-right-2"]
         point = CoreV1StructuralPoint(
             subject=inputs.subject,
             point_id="governed-point-1",
             kind=SwingType.HIGH,
             price=105.0,
-            timing=timing(point_time, (point_source,), base_scoped=True),
+            timing=timing(
+                point_time,
+                (point_source, point_confirmation_source),
+                confirmation=point_confirmation_source.event_timestamp.isoformat(),
+                base_scoped=True,
+            ),
         )
 
     liquidity = None
@@ -278,11 +284,11 @@ def components(
         structural_break = CoreV1StructuralBreak(
             subject=inputs.subject,
             structural_point=point,
-            break_price=108.0,
+            break_price=_visible_price_at(inputs, ts(break_time), "close"),
             direction=Direction.BULLISH,
             timing=timing(
                 break_time,
-                (sources["point"], break_source),
+                (*point.timing.source_observations, break_source),
                 base_scoped=True,
             ),
         )
@@ -544,7 +550,7 @@ def test_structural_point_event_and_confirmation_timing_are_preserved():
     assert result.structural_point_timestamp == ts("2026-01-01T10:00:00Z")
     assert (
         result.structural_point.timing.availability_timestamp
-        == ts("2026-01-01T10:00:00Z")
+        == ts("2026-01-01T10:00:50Z")
     )
 
 
@@ -736,6 +742,96 @@ def test_causal_ordering_violation_is_rejected(override, message):
     ):
         values = components(inputs, sources, **override)
         evaluate(inputs, values)
+
+
+@pytest.mark.parametrize(
+    ("point_source_name", "point_available", "point_confirmation"),
+    [
+        ("liquidity-breach", "2026-01-01T10:01:00Z", "2026-01-01T10:01:00Z"),
+        (
+            "liquidity-confirmation",
+            "2026-01-01T10:01:30Z",
+            "2026-01-01T10:01:30Z",
+        ),
+        ("point", "2026-01-01T10:01:00Z", "2026-01-01T10:00:00Z"),
+        ("point", "2026-01-01T10:00:00Z", None),
+    ],
+)
+def test_structural_point_must_be_confirmed_and_available_before_liquidity_breach(
+    point_source_name,
+    point_available,
+    point_confirmation,
+):
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    point_source = sources[point_source_name]
+    point_time = point_source.event_timestamp.isoformat()
+    point_sources = (point_source,)
+    if point_source.availability_timestamp != ts(point_available):
+        delayed_source = replace(
+            source(
+                "delayed-point-availability",
+                point_time,
+                point_available,
+            ),
+            base_bar_timestamp=None,
+            is_base_timeframe=False,
+        )
+        context_observation = SubjectVisibleObservation(
+            value={"source_id": delayed_source.source_id},
+            timing=timing(
+                point_time,
+                (delayed_source,),
+                available=point_available,
+                base_scoped=False,
+            ),
+            scope=ObservationScope.CONTEXT,
+        )
+        inputs = replace(
+            inputs,
+            context_observations=(*inputs.context_observations, context_observation),
+        )
+        point_sources = (point_source, delayed_source)
+    point = CoreV1StructuralPoint(
+        subject=inputs.subject,
+        point_id="post-breach-or-unconfirmed-point",
+        kind=SwingType.HIGH,
+        price=105.0,
+        timing=timing(
+            point_time,
+            point_sources,
+            confirmation=point_confirmation,
+            available=point_available,
+            base_scoped=True,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="strictly before the liquidity breach"):
+        evaluate_core_v1_mss(
+            inputs,
+            structural_point=point,
+            liquidity_event=values["liquidity_event"],
+            displacement=values["displacement"],
+        )
+
+
+def test_structural_point_confirmation_requires_its_own_visible_source():
+    inputs, sources = visible_inputs()
+
+    with pytest.raises(ValueError, match="identify its confirmation observation"):
+        CoreV1StructuralPoint(
+            subject=inputs.subject,
+            point_id="unsupported-pivot-confirmation",
+            kind=SwingType.HIGH,
+            price=105.0,
+            timing=timing(
+                "2026-01-01T10:00:00Z",
+                (sources["point"],),
+                confirmation="2026-01-01T10:00:50Z",
+                available="2026-01-01T10:00:50Z",
+                base_scoped=True,
+            ),
+        )
 
 
 def test_replay_subject_identity_is_preserved_exactly():

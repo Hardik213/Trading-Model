@@ -61,6 +61,16 @@ class CoreV1StructuralPoint:
             raise ValueError(
                 "Structural point provenance must identify its event observation."
             )
+        if (
+            self.timing.confirmation_timestamp is not None
+            and not any(
+                source.event_timestamp == self.timing.confirmation_timestamp
+                for source in self.timing.source_observations
+            )
+        ):
+            raise ValueError(
+                "Structural point provenance must identify its confirmation observation."
+            )
 
 
 @dataclass(frozen=True)
@@ -561,6 +571,23 @@ def evaluate_core_v1_mss(
     displacement_timing.validate_for_subject(inputs.subject)
     _validate_base_visibility(displacement_timing, inputs.subject, "Displacement")
     _validate_visible_lineage(displacement_timing, inputs, "Displacement")
+
+    assert liquidity_event.breach is not None
+    breach_timestamp = liquidity_event.breach.timing.event_timestamp
+    point_confirmation = point.timing.confirmation_timestamp
+    if (
+        point.timing.event_timestamp >= breach_timestamp
+        or point_confirmation is None
+        or point_confirmation >= breach_timestamp
+        or point.timing.availability_timestamp >= breach_timestamp
+        or any(
+            source.availability_timestamp >= breach_timestamp
+            for source in point.timing.source_observations
+        )
+    ):
+        raise ValueError(
+            "Structural point must be confirmed and fully available strictly before the liquidity breach."
+        )
 
     if structural_break is None:
         return _unresolved(inputs, "Structural break is unresolved.")

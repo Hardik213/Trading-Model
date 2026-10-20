@@ -320,7 +320,8 @@ def make_fixture() -> Fixture:
         105.0,
         make_timing(
             "2026-01-01T10:00:00Z",
-            (sources["point"],),
+            (sources["point"], sources["liquidity-level-right-2"]),
+            confirmation="2026-01-01T10:00:50Z",
         ),
     )
     (level,) = tuple(
@@ -356,7 +357,7 @@ def make_fixture() -> Fixture:
         108.0,
         make_timing(
             "2026-01-01T10:03:00Z",
-            (sources["point"], sources["break"]),
+            (*point.timing.source_observations, sources["break"]),
         ),
         direction=Direction.BULLISH,
     )
@@ -366,8 +367,7 @@ def make_fixture() -> Fixture:
         make_timing(
             "2026-01-01T10:03:00Z",
             (
-                sources["point"],
-                sources["break"],
+                *structural_break.timing.source_observations,
                 sources["follow-through"],
             ),
             confirmation="2026-01-01T10:05:00Z",

@@ -801,7 +801,10 @@ def test_causal_ordering_violation_in_mss_is_rejected():
             availability=fixture.subject.availability_timestamp.isoformat(),
         ),
     )
-    with pytest.raises(ValueError, match="Causal MSS ordering violation"):
+    with pytest.raises(
+        ValueError,
+        match="Structural point must be confirmed|Causal MSS ordering violation",
+    ):
         evaluate(
             kwargs,
             mss=replace(
