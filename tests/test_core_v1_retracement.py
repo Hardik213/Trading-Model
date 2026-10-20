@@ -36,7 +36,9 @@ from src.core_v1_reactionary_zones import (
     evaluate_core_v1_fvg,
 )
 from src.core_v1_retracement import (
+    FirstTouchFVGRejectionEntryResolver,
     CoreV1PlannedEntry,
+    CoreV1RetracementInputs,
     CoreV1ZoneInteraction,
     derive_visible_fvg_interaction,
     evaluate_core_v1_retracement,
@@ -640,7 +642,7 @@ def test_future_planned_entry_source_is_rejected_by_subject_availability():
         )
 
 
-def test_planned_entry_cannot_precede_prerequisite_availability_or_zone_interaction():
+def test_planned_entry_event_can_precede_delayed_availability_at_decision():
     fixture = make_fixture()
     too_early = CoreV1PlannedEntry(
         fixture.subject,
@@ -652,8 +654,11 @@ def test_planned_entry_cannot_precede_prerequisite_availability_or_zone_interact
             base_scoped=False,
         ),
     )
-    with pytest.raises(ValueError, match="precedes prerequisite availability"):
-        evaluate(fixture, resolver=FixedEntryResolver(too_early))
+    result = evaluate(fixture, resolver=FixedEntryResolver(too_early))
+    assert result.state is PrecisionState.VALID
+    assert result.planned_entry is too_early
+    assert result.planned_entry.timing.event_timestamp == ts("2026-01-01T10:06:10Z")
+    assert result.planned_entry.timing.availability_timestamp == ts("2026-01-01T10:06:17Z")
 
 
 def test_planned_entry_provenance_must_trace_every_prerequisite_and_be_visible():
@@ -872,14 +877,18 @@ def test_entry_state_uses_only_existing_four_state_vocabulary():
 def test_visible_fvg_interaction_is_first_post_availability_overlap():
     fixture = make_fixture()
 
-    interaction = derive_visible_fvg_interaction(fixture.inputs, fixture.zone)
+    interaction = derive_visible_fvg_interaction(
+        fixture.inputs,
+        fixture.zone,
+        fixture.mss,
+    )
 
     assert interaction is not None
     assert interaction.zone is fixture.zone
-    assert interaction.interaction_timestamp == ts("2026-01-01T10:05:00Z")
+    assert interaction.interaction_timestamp == ts("2026-01-01T10:06:10Z")
     assert interaction.price is None
     assert fixture.zone.timing.source_observations[0] in interaction.timing.source_observations
-    assert fixture.sources["follow-through"] in interaction.timing.source_observations
+    assert fixture.sources["interaction"] in interaction.timing.source_observations
     assert interaction.timing.provenance["exact_touch_price_inferred"] is False
 
 
@@ -899,7 +908,21 @@ def test_visible_fvg_interaction_is_unresolved_when_post_zone_bars_do_not_overla
         observations.append(item)
     inputs = replace(fixture.inputs, base_observations=tuple(observations))
 
-    assert derive_visible_fvg_interaction(inputs, fixture.zone) is None
+    assert derive_visible_fvg_interaction(inputs, fixture.zone, fixture.mss) is None
+
+
+def test_fvg_touch_at_mss_confirmation_is_not_a_post_mss_retracement():
+    fixture = make_fixture()
+    inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            item
+            for item in fixture.inputs.base_observations
+            if item.timing.event_timestamp <= fixture.mss.confirmation_timestamp
+        ),
+    )
+
+    assert derive_visible_fvg_interaction(inputs, fixture.zone, fixture.mss) is None
 
 
 def test_entry_resolver_cannot_bypass_missing_visible_zone_interaction():
@@ -917,3 +940,119 @@ def test_entry_resolver_cannot_bypass_missing_visible_zone_interaction():
     assert result.state is PrecisionState.DEVELOPING
     assert result.planned_entry is None
     assert "post-availability interaction are required" in result.reason
+
+
+def test_experimental_first_touch_close_back_out_yields_planned_price_not_fill():
+    fixture = make_fixture()
+    interaction = derive_visible_fvg_interaction(
+        fixture.inputs,
+        fixture.zone,
+        fixture.mss,
+    )
+    assert interaction is not None
+    result = evaluate_core_v1_retracement(
+        fixture.inputs,
+        mss=fixture.mss,
+        liquidity=fixture.liquidity,
+        displacement=fixture.displacement,
+        zone=fixture.zone,
+        interaction=interaction,
+        resolver=FirstTouchFVGRejectionEntryResolver(),
+    )
+
+    assert result.state is PrecisionState.VALID
+    assert result.planned_entry_price == 113.0
+    assert result.planned_entry is not None
+    assert result.planned_entry.timing.event_timestamp == ts("2026-01-01T10:06:10Z")
+    assert result.planned_entry.timing.availability_timestamp == fixture.subject.availability_timestamp
+    assert result.planned_entry.timing.provenance["fill_status"] == "NOT_A_FILL"
+    assert not hasattr(result.planned_entry, "fill_price")
+
+
+def test_experimental_first_touch_requires_close_outside_fvg_far_edge():
+    fixture = make_fixture()
+    observations = []
+    for item in fixture.inputs.base_observations:
+        if item.timing.event_timestamp == ts("2026-01-01T10:06:10Z"):
+            item = replace(item, value={**item.value, "close": 102.0})
+        observations.append(item)
+    inputs = replace(fixture.inputs, base_observations=tuple(observations))
+    interaction = derive_visible_fvg_interaction(inputs, fixture.zone, fixture.mss)
+    assert interaction is not None
+
+    result = evaluate_core_v1_retracement(
+        inputs,
+        mss=fixture.mss,
+        liquidity=fixture.liquidity,
+        displacement=fixture.displacement,
+        zone=fixture.zone,
+        interaction=interaction,
+        resolver=FirstTouchFVGRejectionEntryResolver(),
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.planned_entry is None
+
+
+def test_experimental_first_touch_supports_bearish_fvg_far_edge():
+    fixture = make_fixture()
+    bearish_fvg = replace(
+        fixture.zone.fvg,
+        direction=FVGDirection.BEARISH,
+        lower_bound=114.0,
+        upper_bound=115.0,
+        midpoint=114.5,
+        size=1.0,
+    )
+    zone = replace(fixture.zone, fvg=bearish_fvg)
+    interaction = replace(fixture.interaction, zone=zone, price=None)
+    displacement_observation = replace(
+        fixture.displacement.observation,
+        direction=Direction.BEARISH,
+    )
+    displacement = replace(fixture.displacement, observation=displacement_observation)
+    request = CoreV1RetracementInputs(
+        visible_inputs=fixture.inputs,
+        mss=fixture.mss,
+        liquidity=fixture.liquidity,
+        displacement=displacement,
+        zone=zone,
+        interaction=interaction,
+    )
+
+    candidate = FirstTouchFVGRejectionEntryResolver().qualify(request)
+
+    assert candidate is not None
+    assert candidate.planned_entry_price == 113.0
+    assert candidate.timing.provenance["trigger"] == (
+        "first-post-mss-fvg-overlap-closes-beyond-far-edge"
+    )
+
+
+def test_supplied_interaction_at_mss_confirmation_cannot_qualify_entry():
+    fixture = make_fixture()
+    zone_sources = fixture.zone.timing.source_observations
+    interaction_source = fixture.sources["follow-through"]
+    early_interaction = CoreV1ZoneInteraction(
+        subject=fixture.subject,
+        zone=fixture.zone,
+        timing=make_timing(
+            "2026-01-01T10:05:00Z",
+            (*zone_sources, interaction_source),
+            base_scoped=True,
+        ),
+    )
+
+    result = evaluate_core_v1_retracement(
+        fixture.inputs,
+        mss=fixture.mss,
+        liquidity=fixture.liquidity,
+        displacement=fixture.displacement,
+        zone=fixture.zone,
+        interaction=early_interaction,
+        resolver=FixedEntryResolver(fixture.planned_entry),
+    )
+
+    assert result.state is PrecisionState.DEVELOPING
+    assert result.planned_entry is None
+    assert "strictly after MSS confirmation" in result.reason

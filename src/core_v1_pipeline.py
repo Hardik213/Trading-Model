@@ -38,6 +38,7 @@ from .core_v1_reactionary_zones import (
 from .core_v1_retracement import (
     CoreV1RetracementResult,
     CoreV1ZoneInteraction,
+    FirstTouchFVGRejectionEntryResolver,
     ReactionaryZone,
     RetracementEntryResolver,
     derive_visible_fvg_interaction,
@@ -574,7 +575,7 @@ def evaluate_core_v1_pipeline(
     zone_timing = _zone_timing(zone)
     _validate_visible_component(inputs, zone_timing.source_observations, "Reactionary zone")
     if interaction is None and isinstance(zone, CoreV1FVGObservation):
-        interaction = derive_visible_fvg_interaction(inputs, zone)
+        interaction = derive_visible_fvg_interaction(inputs, zone, mss)
     if interaction is not None:
         _validate_subject(interaction, subject, "Zone interaction")
         if interaction.zone is not zone:
@@ -594,7 +595,11 @@ def evaluate_core_v1_pipeline(
         draw_on_liquidity=draw_on_liquidity,
         zone=zone,
         interaction=interaction,
-        resolver=entry_resolver,
+        resolver=(
+            entry_resolver
+            if entry_resolver is not None
+            else FirstTouchFVGRejectionEntryResolver()
+        ),
     )
     if entry.state is not PrecisionState.VALID:
         return _incomplete(

@@ -19,6 +19,8 @@ from .core_v1_reactionary_zones import (
     CoreV1PDArrayObservation,
 )
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
+from .displacement import Direction
+from .fvg import FVGDirection
 from .replay_subject import ReplaySubject, same_subject_id
 # Reuse these four state labels only; no precision-gate rules are imported.
 from .sniper_setup import PrecisionState
@@ -219,6 +221,15 @@ class CoreV1RetracementResult:
                 raise ValueError(
                     "VALID entry qualification requires a reactionary zone and post-availability interaction."
                 )
+            if (
+                self.mss is None
+                or self.mss.confirmation_timestamp is None
+                or self.interaction.interaction_timestamp
+                <= self.mss.confirmation_timestamp
+            ):
+                raise ValueError(
+                    "VALID entry qualification requires interaction strictly after MSS confirmation."
+                )
             if not same_subject_id(self.planned_entry.subject, self.subject):
                 raise ValueError("Planned entry must preserve the exact ReplaySubject.")
             if (
@@ -335,24 +346,115 @@ class RetracementEntryResolver(Protocol):
     ) -> CoreV1PlannedEntry | None: ...
 
 
+class FirstTouchFVGRejectionEntryResolver:
+    """Experimental entry candidate: first post-MSS FVG touch closes back out."""
+
+    def qualify(
+        self,
+        inputs: CoreV1RetracementInputs,
+    ) -> CoreV1PlannedEntry | None:
+        if not isinstance(inputs, CoreV1RetracementInputs):
+            raise TypeError("inputs must be CoreV1RetracementInputs.")
+        zone = inputs.zone
+        interaction = inputs.interaction
+        displacement = inputs.displacement
+        if (
+            not isinstance(zone, CoreV1FVGObservation)
+            or interaction is None
+            or interaction.zone is not zone
+            or displacement is None
+            or displacement.observation is None
+            or displacement.observation.direction not in {Direction.BULLISH, Direction.BEARISH}
+        ):
+            return None
+        if interaction.interaction_timestamp <= zone.timing.availability_timestamp:
+            return None
+        if (
+            inputs.mss is None
+            or inputs.mss.confirmation_timestamp is None
+            or interaction.interaction_timestamp <= inputs.mss.confirmation_timestamp
+        ):
+            return None
+
+        zone_sources = _zone_timing(zone).source_observations
+        interaction_sources = tuple(
+            source
+            for source in interaction.timing.source_observations
+            if source not in zone_sources
+            and source.event_timestamp == interaction.interaction_timestamp
+        )
+        if len(interaction_sources) != 1:
+            return None
+        interaction_source = interaction_sources[0]
+        matching_bars = tuple(
+            item
+            for item in inputs.visible_inputs.base_observations
+            if interaction_source in item.timing.source_observations
+        )
+        if len(matching_bars) != 1 or not isinstance(matching_bars[0].value, Mapping):
+            return None
+        values = {str(key).lower(): value for key, value in matching_bars[0].value.items()}
+        try:
+            close = float(values["close"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not isfinite(close):
+            return None
+
+        direction = displacement.observation.direction
+        if direction is Direction.BULLISH:
+            if zone.fvg.direction is not FVGDirection.BULLISH or close <= zone.fvg.upper_bound:
+                return None
+        elif zone.fvg.direction is not FVGDirection.BEARISH or close >= zone.fvg.lower_bound:
+            return None
+
+        sources = _prerequisite_sources(inputs)
+        timing = EvidenceTiming.from_inputs(
+            event_timestamp=interaction.interaction_timestamp,
+            confirmation_timestamp=interaction.interaction_timestamp,
+            source_observations=sources,
+            provenance={
+                "resolver": "core-v1-first-touch-fvg-rejection",
+                "trigger": "first-post-mss-fvg-overlap-closes-beyond-far-edge",
+                "planned_price_source": "trigger-bar-close",
+                "fill_status": "NOT_A_FILL",
+            },
+            base_bar_scoped=True,
+        )
+        return CoreV1PlannedEntry(
+            subject=inputs.visible_inputs.subject,
+            planned_entry_price=close,
+            timing=timing,
+        )
+
+
 def derive_visible_fvg_interaction(
     inputs: SubjectVisibleInputs,
     zone: CoreV1FVGObservation,
+    mss: CoreV1MSSResult,
 ) -> CoreV1ZoneInteraction | None:
-    """Return the first visible post-availability OHLC overlap with an FVG."""
+    """Return the first visible post-MSS OHLC overlap with an FVG."""
     if not isinstance(inputs, SubjectVisibleInputs):
         raise TypeError("inputs must be SubjectVisibleInputs.")
     if not isinstance(zone, CoreV1FVGObservation):
         raise TypeError("zone must be a CoreV1FVGObservation.")
     if not same_subject_id(zone.subject, inputs.subject):
         raise ValueError("FVG zone belongs to another ReplaySubject.")
+    if (
+        not isinstance(mss, CoreV1MSSResult)
+        or mss.status is not MSSStatus.MSS
+        or mss.confirmation_timestamp is None
+        or not same_subject_id(mss.subject, inputs.subject)
+    ):
+        return None
     _validate_visible_sources(zone.timing.source_observations, inputs, "FVG zone")
 
     fvg = zone.fvg
+    earliest_interaction = max(zone.timing.availability_timestamp, mss.confirmation_timestamp)
     relevant = tuple(
         item
         for item in inputs.base_observations
-        if item.timing.event_timestamp > zone.timing.availability_timestamp
+        if item.timing.event_timestamp > earliest_interaction
     )
     times = tuple(item.timing.event_timestamp for item in relevant)
     if any(right <= left for left, right in zip(times, times[1:])):
@@ -468,12 +570,22 @@ def evaluate_core_v1_retracement(
             "Planned entry provenance must retain every supplied prerequisite source."
         )
     latest_required_time = _latest_prerequisite_availability(request)
-    if candidate.timing.event_timestamp < latest_required_time:
-        raise ValueError("Planned entry event precedes prerequisite availability.")
+    if candidate.timing.availability_timestamp < latest_required_time:
+        raise ValueError("Planned entry is unavailable before prerequisite evidence.")
     if interaction is not None and (
         candidate.timing.event_timestamp < interaction.interaction_timestamp
     ):
         raise ValueError("Planned entry event precedes the supplied zone interaction.")
+    if (
+        interaction is not None
+        and mss is not None
+        and mss.confirmation_timestamp is not None
+        and interaction.interaction_timestamp <= mss.confirmation_timestamp
+    ):
+        return _unresolved(
+            request,
+            "NO_ENTRY_UNRESOLVED: the zone interaction is not strictly after MSS confirmation.",
+        )
 
     provenance = _provenance(request, candidate)
     return CoreV1RetracementResult(
@@ -892,6 +1004,7 @@ __all__ = [
     "CoreV1RetracementInputs",
     "CoreV1RetracementResult",
     "CoreV1ZoneInteraction",
+    "FirstTouchFVGRejectionEntryResolver",
     "ReactionaryZone",
     "RetracementEntryResolver",
     "derive_visible_fvg_interaction",

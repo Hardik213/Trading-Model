@@ -14,6 +14,6 @@
 
 ## Limits
 
-An FVG is a candidate reactionary zone, not a setup or signal. The source playbook requires contextual justification and retracement into a PD array but does not provide a deterministic touch/rejection/entry rule here. The canonical pipeline therefore keeps entry unresolved without an explicit governed entry policy. A planned entry is not an execution fill; execution still requires a later eligible quote under the execution contract.
+An FVG is a candidate reactionary zone, not a setup or signal. The source playbook requires contextual justification and retracement into a PD array but does not provide a deterministic touch/rejection/entry rule. The pipeline's current first-touch rejection policy is recorded as experimental in the retracement contract and has not been performance evaluated. A planned entry is not an execution fill; execution still requires a later eligible quote under the execution contract.
 
 This is a development rule only. It reports no performance and does not authorize replay evaluation or access to the sealed 2025 outcomes.

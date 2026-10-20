@@ -862,7 +862,7 @@ def test_supplied_foreign_liquidity_reference_is_not_accepted_by_mss():
         evaluate(kwargs, liquidity=fixture.liquidity)
 
 
-def test_pipeline_derives_fvg_candidate_but_keeps_entry_unresolved(monkeypatch):
+def test_pipeline_runs_experimental_entry_through_structural_risk_gates(monkeypatch):
     fixture, kwargs = pipeline_fixture()
     calls = []
 
@@ -883,6 +883,9 @@ def test_pipeline_derives_fvg_candidate_but_keeps_entry_unresolved(monkeypatch):
     assert result.interaction is not None
     assert result.interaction.price is None
     assert result.retracement is not None
-    assert result.retracement.planned_entry is None
-    assert result.state is PrecisionState.DEVELOPING
+    assert result.retracement.state is PrecisionState.VALID
+    assert result.retracement.planned_entry is not None
+    assert result.retracement.planned_entry_price == 113.0
+    assert result.state is PrecisionState.INVALID
     assert result.hypothesis is None
+    assert "target must be above planned entry" in result.reason
