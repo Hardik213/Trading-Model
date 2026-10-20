@@ -410,16 +410,29 @@ def test_pipeline_rejects_forged_breach_on_genuine_visible_swing():
     assert canonical.breach.price == _visible_price_at(
         kwargs["inputs"],
         canonical.breach.timing.event_timestamp,
-        "high",
+        "low" if canonical.level.side.value == "SSL" else "high",
     )
-    other_visible_high = next(
-        float(observation.value["high"])
+    other_visible_breach_price = next(
+        float(
+            observation.value["low"]
+            if canonical.level.side.value == "SSL"
+            else observation.value["high"]
+        )
         for observation in kwargs["inputs"].base_observations
         if observation.timing.event_timestamp
         != canonical.breach.timing.event_timestamp
-        and float(observation.value["high"]) > canonical.level.price
+        and float(
+            observation.value["low"]
+            if canonical.level.side.value == "SSL"
+            else observation.value["high"]
+        ) != canonical.breach.price
+        and (
+            float(observation.value["low"]) < canonical.level.price
+            if canonical.level.side.value == "SSL"
+            else float(observation.value["high"]) > canonical.level.price
+        )
     )
-    forged_breach = replace(canonical.breach, price=other_visible_high)
+    forged_breach = replace(canonical.breach, price=other_visible_breach_price)
     forged = replace(
         canonical,
         breach=forged_breach,
@@ -436,20 +449,32 @@ def test_pipeline_rejects_forged_reaction_on_genuine_visible_swing():
     confirmation_price = _visible_price_at(
         kwargs["inputs"],
         canonical.reaction.timing.confirmation_timestamp,
-        "low",
+        "high" if canonical.level.side.value == "SSL" else "low",
     )
     assert canonical.reaction.price == confirmation_price
-    other_visible_low = next(
-        float(observation.value["low"])
+    other_visible_reaction_price = next(
+        float(
+            observation.value["high"]
+            if canonical.level.side.value == "SSL"
+            else observation.value["low"]
+        )
         for observation in kwargs["inputs"].base_observations
         if observation.timing.event_timestamp
         != canonical.reaction.timing.confirmation_timestamp
-        and float(observation.value["low"]) != canonical.reaction.price
-        and float(observation.value["low"]) <= canonical.level.price
+        and float(
+            observation.value["high"]
+            if canonical.level.side.value == "SSL"
+            else observation.value["low"]
+        ) != canonical.reaction.price
+        and (
+            float(observation.value["high"]) >= canonical.level.price
+            if canonical.level.side.value == "SSL"
+            else float(observation.value["low"]) <= canonical.level.price
+        )
     )
     forged = replace(
         canonical,
-        reaction=replace(canonical.reaction, price=other_visible_low),
+        reaction=replace(canonical.reaction, price=other_visible_reaction_price),
     )
 
     with pytest.raises(ValueError, match="full assessment recomputed"):
@@ -529,7 +554,6 @@ def test_pipeline_rejects_opposing_candidate_without_visible_swing_recomputation
             },
             "displacement evidence is missing or unresolved",
         ),
-        ({"mss": None}, "MSS evidence is missing or unresolved"),
         (
             {
                 "mss": lambda fixture: CoreV1MSSResult(
@@ -654,6 +678,7 @@ def test_missing_invalidation_or_target_blocks_complete_hypothesis(invalidation,
     overrides = {}
     if invalidation is None:
         overrides["invalidation"] = None
+        overrides["invalidation_resolver"] = FixedInvalidationResolver(None)
     if target is None:
         overrides["target"] = None
         overrides["opposing_liquidity_levels"] = ()
@@ -697,6 +722,16 @@ def test_single_stage_bypasses_never_produce_entry_or_hypothesis(bypass, overrid
         "planned-entry": {"entry_resolver": resolver},
     }[bypass]
     supplied.update(overrides)
+    if bypass == "displacement":
+        unresolved_level = next(
+            level
+            for level in detect_core_v1_liquidity_levels(kwargs["inputs"])
+            if level.side.value == "BSL" and level.price == 116.0
+        )
+        (supplied["liquidity"],) = evaluate_core_v1_liquidity(
+            kwargs["inputs"],
+            levels=(unresolved_level,),
+        )
     result = evaluate(kwargs, **supplied)
 
     assert result.state is PrecisionState.DEVELOPING
@@ -915,9 +950,15 @@ def test_pipeline_result_derives_metadata_when_maps_are_omitted():
 
 
 def test_future_sentinel_cannot_be_used_when_mandatory_stage_is_missing():
-    _, kwargs = pipeline_fixture()
+    fixture, kwargs = pipeline_fixture()
     resolver = kwargs["entry_resolver"]
-    earlier = evaluate(kwargs, mss=None)
+    unresolved_mss = CoreV1MSSResult(
+        subject=fixture.subject,
+        status=MSSStatus.NOT_MSS_UNRESOLVED,
+        availability_timestamp=fixture.subject.availability_timestamp,
+        reason="unresolved",
+    )
+    earlier = evaluate(kwargs, mss=unresolved_mss)
     assert earlier.state is PrecisionState.DEVELOPING
     assert resolver.received is None
     assert earlier.hypothesis is None

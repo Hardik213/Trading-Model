@@ -182,6 +182,11 @@ def governed_directional_evidence(
 
 
 def with_visible_ssl_swing(inputs: SubjectVisibleInputs) -> SubjectVisibleInputs:
+    if any(
+        level.side is LiquiditySide.SSL
+        for level in detect_core_v1_liquidity_levels(inputs)
+    ):
+        return inputs
     pivot_time = ts("2026-01-01T10:00:30Z")
     observations = tuple(
         replace(
@@ -194,7 +199,7 @@ def with_visible_ssl_swing(inputs: SubjectVisibleInputs) -> SubjectVisibleInputs
         for item in inputs.base_observations
     )
     if observations == inputs.base_observations:
-        raise AssertionError("expected a visible source bar for the synthetic SSL swing")
+        return inputs
     return replace(inputs, base_observations=observations)
 
 
@@ -260,19 +265,17 @@ def make_fixture() -> Fixture:
     support_bars = (
         (101.0, 103.0, 99.0, 101.0),
         (102.0, 104.0, 98.0, 102.0),
-        (104.0, 106.0, 100.0, 105.0),
+        (104.0, 106.0, 95.0, 105.0),
         (103.0, 105.0, 97.0, 104.0),
         (102.0, 104.0, 96.0, 103.0),
     )
     ohlc_by_source = {
-        source.source_id: dict(
-            zip(("open", "high", "low", "close"), bar)
-        )
+        source.source_id: dict(zip(("open", "high", "low", "close"), bar))
         for source, bar in zip(ordered_base_sources, support_bars)
     }
     for index, source in enumerate(ordered_base_sources[len(support_bars):]):
         high = 107.0 + index
-        low = 95.0 - index
+        low = 94.0 if index == 0 else 95.0 - index
         ohlc_by_source[source.source_id] = {
             "open": high - 2.0,
             "high": high,
@@ -329,6 +332,7 @@ def make_fixture() -> Fixture:
         for candidate in detect_core_v1_liquidity_levels(inputs)
         if candidate.timing.event_timestamp
         == sources["liquidity-level"].event_timestamp
+        and candidate.side is LiquiditySide.SSL
     )
     (liquidity,) = evaluate_core_v1_liquidity(
         inputs,
@@ -578,7 +582,12 @@ def test_range_anchor_provenance_must_support_both_declared_anchor_times():
         fixture.displacement.observation.direction,
         before=fixture.liquidity.breach.timing.event_timestamp,
     )
-    unsupported = replace(context, provenance=context.provenance[:1])
+    displacement_source = fixture.sources["displacement"]
+    unsupported = replace(
+        context,
+        availability_timestamp=displacement_source.availability_timestamp,
+        provenance=(displacement_source,),
+    )
 
     with pytest.raises(ValueError, match="anchors must be supported"):
         evaluate(fixture, context=unsupported, draw_on_liquidity=draw)

@@ -559,6 +559,8 @@ def evaluate_core_v1_mss(
     if liquidity_event is None or not _liquidity_is_resolved(liquidity_event):
         return _unresolved(inputs, "Liquidity event is unresolved.")
     _validate_liquidity(liquidity_event, inputs)
+    if liquidity_event.sweep is not SweepKind.SWEEP:
+        return _unresolved(inputs, "Liquidity event is not a confirmed sweep.")
 
     if displacement is None or displacement.status is not DisplacementStatus.DISPLACEMENT:
         return _unresolved(inputs, "Displacement is unresolved.")
@@ -571,6 +573,18 @@ def evaluate_core_v1_mss(
     displacement_timing.validate_for_subject(inputs.subject)
     _validate_base_visibility(displacement_timing, inputs.subject, "Displacement")
     _validate_visible_lineage(displacement_timing, inputs, "Displacement")
+    expected_side = (
+        LiquiditySide.SSL
+        if displacement.observation.direction is Direction.BULLISH
+        else LiquiditySide.BSL
+        if displacement.observation.direction is Direction.BEARISH
+        else None
+    )
+    if expected_side is None or liquidity_event.level.side is not expected_side:
+        return _unresolved(
+            inputs,
+            "Liquidity side conflicts with displacement direction.",
+        )
 
     assert liquidity_event.breach is not None
     breach_timestamp = liquidity_event.breach.timing.event_timestamp
@@ -714,6 +728,9 @@ def _validate_liquidity(
         value.level != recomputed.level
         or value.breach != recomputed.breach
         or value.reaction != recomputed.reaction
+        or value.sweep is not recomputed.sweep
+        or value.sweep_timing != recomputed.sweep_timing
+        or value.sweep_provenance != recomputed.sweep_provenance
     ):
         raise ValueError(
             "Liquidity assessment does not match a full assessment recomputed from visible base observations."

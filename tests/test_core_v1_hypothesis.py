@@ -14,7 +14,11 @@ from src.core_v1_hypothesis import (
     NearestOpposingLiquidityTargetResolver,
     evaluate_core_v1_hypothesis,
 )
-from src.core_v1_liquidity import CoreV1LiquidityLevel
+from src.core_v1_liquidity import (
+    CoreV1LiquidityLevel,
+    detect_core_v1_liquidity_levels,
+    evaluate_core_v1_liquidity,
+)
 from src.displacement import Direction
 from src.evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from src.market_structure import LiquiditySide
@@ -27,6 +31,48 @@ from tests.test_core_v1_retracement import (
     with_visible_ssl_swing,
 )
 from src.core_v1_retracement import evaluate_core_v1_retracement
+
+
+def bearish_entry_components(fixture, entry):
+    bsl_level = next(
+        level
+        for level in detect_core_v1_liquidity_levels(fixture.inputs)
+        if level.side is LiquiditySide.BSL
+    )
+    (bsl_liquidity,) = evaluate_core_v1_liquidity(
+        fixture.inputs,
+        levels=(bsl_level,),
+    )
+    bearish_displacement = replace(
+        fixture.displacement,
+        observation=replace(
+            fixture.displacement.observation,
+            direction=Direction.BEARISH,
+        ),
+    )
+    bearish_mss = replace(
+        entry.mss,
+        liquidity_event=bsl_liquidity,
+        displacement=bearish_displacement,
+    )
+    short_context, short_draw = governed_directional_evidence(
+        fixture.inputs,
+        Direction.BEARISH,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    return replace(
+        entry,
+        liquidity=bsl_liquidity,
+        displacement=bearish_displacement,
+        mss=bearish_mss,
+        context=short_context,
+        draw_on_liquidity=short_draw,
+        provenance={
+            **entry.provenance,
+            "context": short_context.provenance,
+            "draw_on_liquidity": short_draw.timing.source_observations,
+        },
+    )
 
 
 def ts(value: str) -> pd.Timestamp:
@@ -209,6 +255,10 @@ def test_hypothesis_provenance_rejects_oversized_mapping_keys():
 def test_valid_short_complete_hypothesis_uses_governed_bearish_direction():
     fixture, entry = valid_entry()
     fixture.inputs = with_visible_ssl_swing(fixture.inputs)
+    entry = bearish_entry_components(fixture, entry)
+    fixture.liquidity = entry.liquidity
+    fixture.displacement = entry.displacement
+    fixture.mss = entry.mss
     short_context, short_draw = governed_directional_evidence(
         fixture.inputs,
         Direction.BEARISH,
@@ -346,13 +396,50 @@ def test_nearest_opposing_target_resolver_fails_closed_on_equal_distance_tie():
 
 def test_liquidity_extreme_invalidation_fails_closed_on_direction_side_conflict():
     fixture, entry = valid_entry()
-
-    result = LiquidityEventExtremeInvalidationResolver().resolve(
-        CoreV1HypothesisInputs(entry)
+    bearish_displacement = replace(
+        fixture.displacement,
+        observation=replace(
+            fixture.displacement.observation,
+            direction=Direction.BEARISH,
+        ),
+    )
+    bearish_break = replace(
+        entry.mss.structural_break,
+        direction=Direction.BEARISH,
+    )
+    bearish_mss = replace(
+        entry.mss,
+        displacement=bearish_displacement,
+        structural_break=bearish_break,
+        confirmation=replace(
+            entry.mss.confirmation,
+            structural_break=bearish_break,
+        ),
+    )
+    short_context, short_draw = governed_directional_evidence(
+        fixture.inputs,
+        Direction.BEARISH,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    bearish_entry = replace(
+        entry,
+        displacement=bearish_displacement,
+        mss=bearish_mss,
+        context=short_context,
+        draw_on_liquidity=short_draw,
+        provenance={
+            **entry.provenance,
+            "context": short_context.provenance,
+            "draw_on_liquidity": short_draw.timing.source_observations,
+        },
     )
 
-    assert fixture.displacement.observation.direction is Direction.BULLISH
-    assert fixture.liquidity.level.side is LiquiditySide.BSL
+    result = LiquidityEventExtremeInvalidationResolver().resolve(
+        CoreV1HypothesisInputs(bearish_entry)
+    )
+
+    assert bearish_displacement.observation.direction is Direction.BEARISH
+    assert fixture.liquidity.level.side is LiquiditySide.SSL
     assert result is None
 
 
@@ -432,6 +519,10 @@ def test_incoherent_directional_geometry_returns_invalid(
     fixture, entry = valid_entry()
     if direction == "SHORT":
         fixture.inputs = with_visible_ssl_swing(fixture.inputs)
+        entry = bearish_entry_components(fixture, entry)
+        fixture.liquidity = entry.liquidity
+        fixture.displacement = entry.displacement
+        fixture.mss = entry.mss
         short_context, short_draw = governed_directional_evidence(
             fixture.inputs,
             Direction.BEARISH,

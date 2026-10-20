@@ -124,10 +124,10 @@ def visible_inputs() -> tuple[
         (102.0, 104.0, 101.0, 103.0),
         (103.0, 105.0, 100.0, 104.0),
         (104.0, 105.5, 101.0, 105.0),
-        (104.0, 106.0, 101.0, 105.0),
+        (104.0, 104.0, 95.0, 100.0),
         (103.0, 105.0, 99.0, 104.0),
         (102.0, 104.0, 98.0, 103.0),
-        (102.0, 107.0, 97.0, 106.0),
+        (102.0, 107.0, 94.0, 106.0),
         (103.0, 108.0, 96.0, 107.0),
         (104.0, 109.0, 95.0, 108.0),
         (105.0, 110.0, 94.0, 109.0),
@@ -207,6 +207,7 @@ def components(
             candidate
             for candidate in detect_core_v1_liquidity_levels(inputs)
             if candidate.timing.event_timestamp == level_source.event_timestamp
+            and candidate.side is LiquiditySide.SSL
         )
         if liquidity_resolved and liquidity_time == "2026-01-01T10:01:00Z":
             (liquidity,) = evaluate_core_v1_liquidity(
@@ -218,7 +219,7 @@ def components(
             liquidity_breach = CoreV1LiquidityBreach(
                 subject=inputs.subject,
                 level=level,
-                price=107.0,
+                price=(94.0 if level.side is LiquiditySide.SSL else 107.0),
                 timing=timing(
                     liquidity_time,
                     (*level.timing.source_observations, breach_source),
@@ -370,7 +371,7 @@ def test_mss_rejects_liquidity_level_not_recomputed_from_visible_bars():
     fabricated_level = CoreV1LiquidityLevel(
         subject=inputs.subject,
         level_id="fabricated-level",
-        side=LiquiditySide.BSL,
+        side=accepted.level.side,
         price=105.0,
         timing=accepted.level.timing,
     )
@@ -398,16 +399,29 @@ def test_mss_rejects_forged_breach_on_genuine_visible_swing():
     assert canonical.breach.price == _visible_price_at(
         inputs,
         canonical.breach.timing.event_timestamp,
-        "high",
+        "low" if canonical.level.side is LiquiditySide.SSL else "high",
     )
-    other_visible_high = next(
-        float(observation.value["high"])
+    other_visible_breach_price = next(
+        float(
+            observation.value["low"]
+            if canonical.level.side is LiquiditySide.SSL
+            else observation.value["high"]
+        )
         for observation in inputs.base_observations
         if observation.timing.event_timestamp
         != canonical.breach.timing.event_timestamp
-        and float(observation.value["high"]) > canonical.level.price
+        and float(
+            observation.value["low"]
+            if canonical.level.side is LiquiditySide.SSL
+            else observation.value["high"]
+        ) != canonical.breach.price
+        and (
+            float(observation.value["low"]) < canonical.level.price
+            if canonical.level.side is LiquiditySide.SSL
+            else float(observation.value["high"]) > canonical.level.price
+        )
     )
-    forged_breach = replace(canonical.breach, price=other_visible_high)
+    forged_breach = replace(canonical.breach, price=other_visible_breach_price)
     forged = replace(
         canonical,
         breach=forged_breach,
@@ -426,7 +440,7 @@ def test_mss_rejects_forged_reaction_on_genuine_visible_swing():
     confirmation_price = _visible_price_at(
         inputs,
         canonical.reaction.timing.confirmation_timestamp,
-        "low",
+        "high" if canonical.level.side is LiquiditySide.SSL else "low",
     )
     assert canonical.reaction.price == confirmation_price
     other_visible_low = next(
@@ -434,7 +448,11 @@ def test_mss_rejects_forged_reaction_on_genuine_visible_swing():
         for observation in inputs.base_observations
         if observation.timing.event_timestamp
         != canonical.reaction.timing.confirmation_timestamp
-        and float(observation.value["low"]) <= canonical.level.price
+        and (
+            float(observation.value["high"]) >= canonical.level.price
+            if canonical.level.side is LiquiditySide.SSL
+            else float(observation.value["low"]) <= canonical.level.price
+        )
     )
     forged = replace(
         canonical,
@@ -465,6 +483,36 @@ def test_mss_rejects_acceptance_reaction(monkeypatch):
 
     with pytest.raises(ValueError, match="ACCEPTANCE reactions"):
         _validate_liquidity(acceptance, inputs)
+
+
+def test_mss_rejects_forged_not_sweep_classification():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    values["liquidity_event"] = replace(
+        values["liquidity_event"],
+        sweep=SweepKind.NOT_SWEEP,
+    )
+
+    with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate(inputs, values)
+
+
+def test_mss_is_unresolved_when_displacement_direction_conflicts_with_swept_side():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    displacement = values["displacement"]
+    values["displacement"] = replace(
+        displacement,
+        observation=replace(
+            displacement.observation,
+            direction=Direction.BEARISH,
+        ),
+    )
+
+    result = evaluate(inputs, values)
+
+    assert result.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert "conflicts with displacement direction" in result.reason
 
 
 def test_mss_component_subject_validation_uses_subject_id():
