@@ -5,7 +5,7 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
-from .core_v1_liquidity import CoreV1LiquidityLevel
+from .core_v1_liquidity import CoreV1LiquidityLevel, ReactionKind, SweepKind
 from .core_v1_retracement import CoreV1PlannedEntry, CoreV1RetracementResult
 from .displacement import Direction
 from .evidence_timing import (
@@ -246,6 +246,116 @@ class OpposingLiquidityTargetResolver(Protocol):
     ) -> CoreV1OpposingLiquidityTarget | None: ...
 
 
+class LiquidityEventExtremeInvalidationResolver:
+    """Use the observed sweep extreme as the structural invalidation price."""
+
+    def resolve(
+        self,
+        inputs: CoreV1HypothesisInputs,
+    ) -> CoreV1StructuralInvalidation | None:
+        if not isinstance(inputs, CoreV1HypothesisInputs):
+            raise TypeError("inputs must be CoreV1HypothesisInputs.")
+        entry = inputs.planned_entry
+        liquidity = entry.liquidity
+        if (
+            liquidity is None
+            or liquidity.sweep is not SweepKind.SWEEP
+            or liquidity.breach is None
+            or liquidity.reaction is None
+            or liquidity.reaction.kind is not ReactionKind.REJECTION
+            or liquidity.breach.price is None
+        ):
+            return None
+        direction = _entry_direction(entry)
+        expected_side = (
+            LiquiditySide.SSL
+            if direction is Direction.BULLISH
+            else LiquiditySide.BSL
+        )
+        if liquidity.level.side is not expected_side:
+            return None
+
+        breach = liquidity.breach
+        timing = EvidenceTiming.from_inputs(
+            event_timestamp=breach.timing.event_timestamp,
+            confirmation_timestamp=breach.timing.confirmation_timestamp,
+            source_observations=breach.timing.source_observations,
+            provenance={
+                "resolver": "core-v1-liquidity-event-extreme-invalidation",
+                "structural_reason": "liquidity-sweep-extreme",
+                "level_id": liquidity.level.level_id,
+            },
+            base_bar_scoped=breach.timing.base_bar_scoped,
+        )
+        return CoreV1StructuralInvalidation(
+            subject=entry.subject,
+            invalidation_id=f"liquidity-event-extreme:{liquidity.level.level_id}",
+            price=float(breach.price),
+            timing=timing,
+        )
+
+
+class NearestOpposingLiquidityTargetResolver:
+    """Choose the unique nearest supplied swing-liquidity level beyond entry."""
+
+    def resolve(
+        self,
+        inputs: CoreV1HypothesisInputs,
+    ) -> CoreV1OpposingLiquidityTarget | None:
+        if not isinstance(inputs, CoreV1HypothesisInputs):
+            raise TypeError("inputs must be CoreV1HypothesisInputs.")
+        entry = inputs.planned_entry
+        direction = _entry_direction(entry)
+        entry_price = entry.planned_entry_price
+        if entry_price is None:
+            return None
+        expected_side = (
+            LiquiditySide.BSL
+            if direction is Direction.BULLISH
+            else LiquiditySide.SSL
+        )
+        eligible = tuple(
+            level
+            for level in inputs.opposing_liquidity_levels
+            if level.side is expected_side
+            and (
+                level.price > entry_price
+                if direction is Direction.BULLISH
+                else level.price < entry_price
+            )
+            and level.timing.availability_timestamp
+            <= entry.planned_entry.timing.availability_timestamp
+        )
+        if not eligible:
+            return None
+        nearest_price = (
+            min(level.price for level in eligible)
+            if direction is Direction.BULLISH
+            else max(level.price for level in eligible)
+        )
+        nearest = tuple(level for level in eligible if level.price == nearest_price)
+        if len(nearest) != 1:
+            return None
+        level = nearest[0]
+        timing = EvidenceTiming.from_inputs(
+            event_timestamp=level.timing.event_timestamp,
+            confirmation_timestamp=level.timing.confirmation_timestamp,
+            source_observations=level.timing.source_observations,
+            provenance={
+                "resolver": "core-v1-nearest-opposing-liquidity",
+                "selection": "nearest-unique-visible-swing-beyond-entry",
+                "level_id": level.level_id,
+            },
+            base_bar_scoped=level.timing.base_bar_scoped,
+        )
+        return CoreV1OpposingLiquidityTarget(
+            subject=entry.subject,
+            target_id=f"opposing-liquidity:{level.level_id}",
+            liquidity_level=level,
+            timing=timing,
+        )
+
+
 def evaluate_core_v1_hypothesis(
     planned_entry: CoreV1RetracementResult,
     *,
@@ -437,6 +547,8 @@ def _validate_component_timing(
     ):
         if timing.availability_timestamp > subject.availability_timestamp:
             raise ValueError(f"{label} is unavailable at the ReplaySubject.")
+        if timing.availability_timestamp > entry.timing.availability_timestamp:
+            raise ValueError(f"{label} was unavailable at planned-entry decision time.")
         if timing.base_bar_scoped:
             if timing.event_timestamp > subject.base_bar_timestamp:
                 raise ValueError(f"{label} event exceeds the base-bar cutoff.")
@@ -557,6 +669,8 @@ def _utc_timestamp(value: object, name: str):
 
 __all__ = [
     "CoreV1HypothesisInputs",
+    "LiquidityEventExtremeInvalidationResolver",
+    "NearestOpposingLiquidityTargetResolver",
     "CoreV1OpposingLiquidityTarget",
     "CoreV1StructuralInvalidation",
     "CoreV1TradeHypothesis",

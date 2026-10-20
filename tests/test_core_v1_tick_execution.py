@@ -540,22 +540,13 @@ def short_pipeline_from_visible_bars(inputs, source_kwargs, template, template_s
         confirmation=short_confirmation,
     )
 
-    selection_sources = tuple(
-        source
-        for source in rebound.target.timing.source_observations
-        if source not in rebound.target.liquidity_level.timing.source_observations
-    )
-    short_target = replace(
-        rebound.target,
-        liquidity_level=level,
-        timing=replace(
-            rebound.target.timing,
-            event_timestamp=level.timing.event_timestamp,
-            source_observations=(*level.timing.source_observations, *selection_sources),
-        ),
-    )
     short_invalidation = replace(rebound.invalidation, price=115.0)
     planned_entry = rebound.retracement.planned_entry
+    opposing_levels = tuple(
+        candidate
+        for candidate in detect_core_v1_liquidity_levels(inputs)
+        if candidate.side is LiquiditySide.SSL
+    )
     return evaluate_core_v1_pipeline(
         inputs,
         context=rebound.context,
@@ -566,12 +557,11 @@ def short_pipeline_from_visible_bars(inputs, source_kwargs, template, template_s
         interaction=rebound.interaction,
         entry_resolver=FixedEntryResolver(planned_entry),
         invalidation=short_invalidation,
-        target=short_target,
-        opposing_liquidity_levels=(level,),
+        opposing_liquidity_levels=opposing_levels,
     )
 
 
-def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
+def test_unresolved_opposing_target_blocks_conflicting_direction_from_becoming_actionable():
     source_kwargs, template = template_fixture()
     template_subject = template.subject
     release_at = ts("2026-01-01T10:09:05Z")
@@ -596,11 +586,8 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
             actionable = [
                 item for item in decision_set.decisions if item.actionable
             ]
-            assert len(actionable) == 2
-            assert {item.direction for item in actionable} == {
-                ExecutionDirection.LONG,
-                ExecutionDirection.SHORT,
-            }
+            assert len(actionable) == 1
+            assert {item.direction for item in actionable} == {ExecutionDirection.LONG}
             return super().submit_decision_set(decision_set)
 
     instance = integration(
@@ -636,14 +623,16 @@ def test_conflicting_governed_directions_are_arbitrated_by_execution_engine():
     decisions = report.decision_sets[0].decisions
     assert len(decisions) == 2
     actionable = [item for item in decisions if item.actionable]
-    assert len(actionable) == 2
-    assert len({item.direction for item in actionable}) == 2
+    assert len(actionable) == 1
     assert len(report.execution_results) == 2
-    assert all(
-        item.status is ExecutionStatus.NO_TRADE_CONFLICTING_DIRECTIONS
+    assert any(
+        item.status is ExecutionStatus.NO_TRADE_NOT_ACTIONABLE
         for item in report.execution_results
     )
-    assert report.execution_results[0].entry_fill is None
+    assert all(
+        item.status is not ExecutionStatus.NO_TRADE_CONFLICTING_DIRECTIONS
+        for item in report.execution_results
+    )
 
 
 def test_same_direction_candidates_delegate_latest_base_bar_selection():
@@ -811,7 +800,7 @@ def test_end_to_end_fill_uses_later_actual_ask_not_planned_entry_and_exits_on_bi
             tick("2026-01-01T10:08:00Z", 1, 101.0, 101.5),
             tick("2026-01-01T10:08:00Z", 2, 110.0, 111.0),
             tick("2026-01-01T10:08:01Z", 3, 104.0, 104.5),
-            tick("2026-01-01T10:08:02Z", 4, 110.25, 110.5),
+            tick("2026-01-01T10:08:02Z", 4, 116.25, 116.5),
         ]
     )
 
@@ -824,7 +813,7 @@ def test_end_to_end_fill_uses_later_actual_ask_not_planned_entry_and_exits_on_bi
     assert result.entry_fill.observed_price != report.subject_executions[0].pipeline_result.hypothesis.planned_entry_price
     assert result.exit_fill.side == "BID"
     assert result.exit_fill.timestamp == ts("2026-01-01T10:08:02Z")
-    assert result.exit_fill.observed_price == 110.25
+    assert result.exit_fill.observed_price == 116.25
 
 
 def test_decision_tick_and_same_timestamp_later_source_order_tick_cannot_fill():

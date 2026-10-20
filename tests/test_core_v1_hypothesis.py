@@ -6,9 +6,12 @@ import pandas as pd
 import pytest
 
 from src.core_v1_hypothesis import (
+    CoreV1HypothesisInputs,
     CoreV1OpposingLiquidityTarget,
     CoreV1StructuralInvalidation,
     CoreV1TradeHypothesis,
+    LiquidityEventExtremeInvalidationResolver,
+    NearestOpposingLiquidityTargetResolver,
     evaluate_core_v1_hypothesis,
 )
 from src.core_v1_liquidity import CoreV1LiquidityLevel
@@ -282,11 +285,50 @@ def test_target_resolver_must_select_from_explicit_governed_liquidity_candidates
         invalidation_resolver=invalidation_resolver,
         target_resolver=target_resolver,
     )
-
     assert result.state is PrecisionState.VALID
     assert target_resolver.received.opposing_liquidity_levels == (
         target.liquidity_level,
     )
+
+
+def test_nearest_opposing_target_resolver_selects_unique_nearest_visible_level():
+    fixture, entry = valid_entry()
+    _, farther = components(fixture, entry, target_price=120.0)
+    _, nearer = components(fixture, entry, target_price=115.0)
+    inputs = CoreV1HypothesisInputs(
+        entry,
+        (farther.liquidity_level, nearer.liquidity_level),
+    )
+
+    result = NearestOpposingLiquidityTargetResolver().resolve(inputs)
+
+    assert result is not None
+    assert result.liquidity_level is nearer.liquidity_level
+    assert result.price == 115.0
+
+
+def test_nearest_opposing_target_resolver_fails_closed_on_equal_distance_tie():
+    fixture, entry = valid_entry()
+    _, target = components(fixture, entry, target_price=115.0)
+    tied = replace(target.liquidity_level, level_id="tied-opposing-level")
+    inputs = CoreV1HypothesisInputs(
+        entry,
+        (target.liquidity_level, tied),
+    )
+
+    assert NearestOpposingLiquidityTargetResolver().resolve(inputs) is None
+
+
+def test_liquidity_extreme_invalidation_fails_closed_on_direction_side_conflict():
+    fixture, entry = valid_entry()
+
+    result = LiquidityEventExtremeInvalidationResolver().resolve(
+        CoreV1HypothesisInputs(entry)
+    )
+
+    assert fixture.displacement.observation.direction is Direction.BULLISH
+    assert fixture.liquidity.level.side is LiquiditySide.BSL
+    assert result is None
 
 
 def test_target_not_selected_from_supplied_liquidity_candidates_fails_closed():

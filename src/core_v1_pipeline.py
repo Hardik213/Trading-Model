@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
+
 from .core_v1_dealing_range import (
     DealingRangeContext,
     DealingRangeResolver,
@@ -17,6 +18,8 @@ from .core_v1_hypothesis import (
     CoreV1OpposingLiquidityTarget,
     CoreV1StructuralInvalidation,
     CoreV1TradeHypothesis,
+    LiquidityEventExtremeInvalidationResolver,
+    NearestOpposingLiquidityTargetResolver,
     OpposingLiquidityTargetResolver,
     StructuralInvalidationResolver,
     evaluate_core_v1_hypothesis,
@@ -28,6 +31,8 @@ from .core_v1_liquidity import (
     detect_core_v1_liquidity_levels,
     evaluate_core_v1_liquidity,
 )
+from .displacement import Direction
+from .market_structure import LiquiditySide
 from .core_v1_mss import CoreV1MSSResult, MSSStatus, evaluate_core_v1_mss
 from .core_v1_reactionary_zones import (
     CoreV1FVGObservation,
@@ -616,13 +621,33 @@ def evaluate_core_v1_pipeline(
             retracement=entry,
         )
 
+    target_source_levels = list(
+        opposing_liquidity_levels if opposing_liquidity_levels else visible_levels
+    )
+    if target is not None and all(
+        candidate is not target.liquidity_level for candidate in target_source_levels
+    ):
+        target_source_levels.append(target.liquidity_level)
+    opposing_liquidity_levels = _visible_unbreached_opposing_levels(
+        inputs,
+        tuple(target_source_levels),
+        entry,
+    )
     hypothesis_result = evaluate_core_v1_hypothesis(
         entry,
         opposing_liquidity_levels=opposing_liquidity_levels,
         invalidation=invalidation,
-        invalidation_resolver=invalidation_resolver,
+        invalidation_resolver=(
+            invalidation_resolver
+            if invalidation_resolver is not None or invalidation is not None
+            else LiquidityEventExtremeInvalidationResolver()
+        ),
         target=target,
-        target_resolver=target_resolver,
+        target_resolver=(
+            target_resolver
+            if target_resolver is not None or target is not None
+            else NearestOpposingLiquidityTargetResolver()
+        ),
     )
     if hypothesis_result.target is not None:
         _validate_recomputed_liquidity_level(
@@ -1040,6 +1065,57 @@ def _liquidity_sources(
         if source not in unique:
             unique.append(source)
     return tuple(unique)
+
+
+def _visible_unbreached_opposing_levels(
+    inputs: SubjectVisibleInputs,
+    levels: tuple[CoreV1LiquidityLevel, ...],
+    entry: CoreV1RetracementResult,
+) -> tuple[CoreV1LiquidityLevel, ...]:
+    if (
+        entry.displacement is None
+        or entry.displacement.observation is None
+        or entry.displacement.observation.direction not in {Direction.BULLISH, Direction.BEARISH}
+        or entry.planned_entry is None
+    ):
+        return ()
+    direction = entry.displacement.observation.direction
+    entry_price = entry.planned_entry.planned_entry_price
+    target_side = LiquiditySide.BSL if direction is Direction.BULLISH else LiquiditySide.SSL
+    eligible = tuple(
+        level
+        for level in levels
+        if level.side is target_side
+        and level.timing.availability_timestamp
+        <= entry.planned_entry.timing.availability_timestamp
+        and (
+            level.price > entry_price
+            if direction is Direction.BULLISH
+            else level.price < entry_price
+        )
+    )
+    if not eligible:
+        return ()
+    decision_cutoff = entry.planned_entry.timing.availability_timestamp
+    entry_inputs = replace(
+        inputs,
+        base_observations=tuple(
+            observation
+            for observation in inputs.base_observations
+            if observation.timing.availability_timestamp <= decision_cutoff
+        ),
+        context_observations=tuple(
+            observation
+            for observation in inputs.context_observations
+            if observation.timing.availability_timestamp <= decision_cutoff
+        ),
+    )
+    assessments = evaluate_core_v1_liquidity(entry_inputs, levels=eligible)
+    return tuple(
+        assessment.level
+        for assessment in assessments
+        if assessment.breach is None
+    )
 
 
 def _zone_timing(zone: ReactionaryZone):

@@ -31,14 +31,14 @@ def invalid_pipeline():
     _, kwargs = pipeline_fixture()
     invalid_entry = replace(
         kwargs["entry_resolver"].result,
-        planned_entry_price=108.0,
+        planned_entry_price=98.0,
     )
     result = evaluate(
         kwargs,
         entry_resolver=FixedEntryResolver(invalid_entry),
     )
     assert result.state is PrecisionState.INVALID
-    assert "LONG opposing-liquidity target must be above planned entry" in result.reason
+    assert "LONG invalidation must be below planned entry" in result.reason
     assert result.hypothesis is None
     return result
 

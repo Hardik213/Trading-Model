@@ -801,11 +801,12 @@ def _validate_level_origin_contract(level: CoreV1LiquidityLevel) -> None:
             "Liquidity origin source ID must identify exactly one level observation."
         )
     source = source_matches[0]
-    if (
-        source.event_timestamp != origin.confirmation_timestamp
-        or source.availability_timestamp != origin.availability_timestamp
+    if source.event_timestamp != origin.confirmation_timestamp:
+        raise ValueError("Liquidity origin confirmation does not match its source observation.")
+    if origin.availability_timestamp != max(
+        item.availability_timestamp for item in level.timing.source_observations
     ):
-        raise ValueError("Liquidity origin timing does not match its source observation.")
+        raise ValueError("Liquidity origin availability must match its latest supporting source.")
     if (
         level.timing.event_timestamp != origin.timestamp
         or level.timing.confirmation_timestamp != origin.confirmation_timestamp

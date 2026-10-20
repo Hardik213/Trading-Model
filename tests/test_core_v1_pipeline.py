@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -98,11 +99,29 @@ def with_extra_visible(inputs, source_observations):
 
 
 def target_for_visible_swing(inputs, target):
-    (level,) = tuple(
+    candidates = tuple(
         candidate
         for candidate in detect_core_v1_liquidity_levels(inputs)
         if candidate.side is target.liquidity_level.side
     )
+    beyond_seed = tuple(
+        candidate
+        for candidate in candidates
+        if (
+            candidate.price > target.price
+            if candidate.side.value == "BSL"
+            else candidate.price < target.price
+        )
+    )
+    if beyond_seed:
+        nearest = (
+            min(candidate.price for candidate in beyond_seed)
+            if beyond_seed[0].side.value == "BSL"
+            else max(candidate.price for candidate in beyond_seed)
+        )
+        (level,) = tuple(candidate for candidate in beyond_seed if candidate.price == nearest)
+    else:
+        (level,) = candidates
     selection_sources = tuple(
         source
         for source in target.timing.source_observations
@@ -121,6 +140,13 @@ def target_for_visible_swing(inputs, target):
 
 def pipeline_fixture():
     fixture = make_fixture()
+    swing_bars = tuple(
+        replace(item, value={**item.value, "high": 116.0})
+        if item.timing.event_timestamp == ts("2026-01-01T10:04:59Z")
+        else item
+        for item in fixture.inputs.base_observations
+    )
+    fixture.inputs = replace(fixture.inputs, base_observations=swing_bars)
     invalidation, target = components(fixture, fixture.planned_entry)
     invalidation_source = replace(
         invalidation.timing.source_observations[0],
@@ -224,6 +250,37 @@ def test_complete_governed_pipeline_preserves_all_stages_and_timing():
     for name, sources in result.hypothesis.provenance.items():
         assert result.provenance[name] == sources
     assert set(result.hypothesis.provenance).issubset(result.provenance)
+
+
+def test_target_breach_eligibility_uses_only_observations_available_at_planned_entry():
+    fixture, kwargs = pipeline_fixture()
+    retracement = evaluate(kwargs).retracement
+    assert retracement is not None
+    early_level = next(
+        level
+        for level in detect_core_v1_liquidity_levels(kwargs["inputs"])
+        if level.side.value == "BSL" and level.price == 106.0
+    )
+    entry_source = fixture.sources["liquidity-level-right-2"]
+    early_planned_entry = replace(
+        retracement.planned_entry,
+        planned_entry_price=100.0,
+        timing=make_timing("2026-01-01T10:00:50Z", (entry_source,)),
+    )
+    early_entry = SimpleNamespace(
+        displacement=retracement.displacement,
+        planned_entry=early_planned_entry,
+    )
+
+    visible_at_entry = pipeline_module._visible_unbreached_opposing_levels(
+        kwargs["inputs"], (early_level,), early_entry
+    )
+    visible_at_subject = pipeline_module._visible_unbreached_opposing_levels(
+        kwargs["inputs"], (early_level,), retracement
+    )
+
+    assert visible_at_entry == (early_level,)
+    assert visible_at_subject == ()
 
 
 def test_pipeline_derives_visible_liquidity_and_keeps_later_stages_fail_closed():
@@ -498,6 +555,8 @@ def test_missing_or_unresolved_prerequisite_blocks_every_later_stage(
             levels=(fixture.liquidity.level,),
         )
         kwargs["inputs"] = unresolved_inputs
+        kwargs["target"] = None
+        kwargs["opposing_liquidity_levels"] = ()
     entry_resolver = kwargs["entry_resolver"]
     result = evaluate(kwargs, **resolved)
 
@@ -647,7 +706,7 @@ def test_premium_context_alone_does_not_qualify_an_entry():
     assert resolver.received is None
 
 
-def test_contradictory_target_geometry_returns_invalid_without_hypothesis():
+def test_target_beyond_entry_geometry_is_unresolved_without_eligible_candidate():
     fixture, kwargs = pipeline_fixture()
     invalidation = kwargs["invalidation"]
     target = kwargs["target"]
@@ -657,7 +716,7 @@ def test_contradictory_target_geometry_returns_invalid_without_hypothesis():
     )
     planned_entry = replace(
         kwargs["entry_resolver"].result,
-        planned_entry_price=107.0,
+        planned_entry_price=117.0,
     )
     result = evaluate(
         kwargs,
@@ -668,9 +727,9 @@ def test_contradictory_target_geometry_returns_invalid_without_hypothesis():
         opposing_liquidity_levels=(target.liquidity_level,),
     )
 
-    assert result.state is PrecisionState.INVALID
+    assert result.state is PrecisionState.DEVELOPING
     assert result.hypothesis is None
-    assert "INVALID" in result.reason
+    assert "target" in result.reason
 
 
 def test_causal_ordering_violation_in_mss_is_rejected():
@@ -886,6 +945,6 @@ def test_pipeline_runs_experimental_entry_through_structural_risk_gates(monkeypa
     assert result.retracement.state is PrecisionState.VALID
     assert result.retracement.planned_entry is not None
     assert result.retracement.planned_entry_price == 113.0
-    assert result.state is PrecisionState.INVALID
-    assert result.hypothesis is None
-    assert "target must be above planned entry" in result.reason
+    assert result.state is PrecisionState.VALID
+    assert result.hypothesis is not None
+    assert result.hypothesis.state is PrecisionState.VALID
