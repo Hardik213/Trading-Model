@@ -37,7 +37,9 @@
       "exact_touch_price": "NOT_INFERRED",
       "entry_rule_id": "E009-20261020-FVG-DRT-QUARTER-REJECTION",
       "entry_rule_status": "OWNER_SPECIFIED_DEVELOPMENT_HYPOTHESIS_NOT_PERFORMANCE_EVALUATED",
-      "planned_entry_is_fill": false
+      "planned_entry_is_fill": false,
+      "cross_session_rejection_policy": "SKIP_OUT_OF_WINDOW_REJECTION_CONTINUE_TO_FIRST_LATER_IN_WINDOW_REJECTION",
+      "candidate_lifetime_policy": "UNRESOLVED_NO_MAXIMUM_WINDOW_COUNT_OR_TRADING_TIME_LIFETIME"
     },
     "lifetime_implementation": "DEFERRED_TRADING_TIME_REQUIRED",
     "breached_without_rejection_consumption": "UNRESOLVED",
@@ -77,7 +79,7 @@
     "live_broker_enabled": false
   },
   "freeze_blockers": [
-    "Trading-time liquidity lifetime requires a verified XAUUSD trading calendar and implementation.",
+    "E009 has no selected maximum window count, trading-time lifetime, or expiry policy; candidate lifetime remains unresolved for freeze.",
     "Consumption behavior for a breached but unrejected liquidity level remains unresolved.",
     "A deterministic dealing-range anchor policy is not selected.",
     "Daily and H4 boundary convention remains pending timezone-aware verification.",

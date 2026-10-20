@@ -1588,7 +1588,7 @@ def test_e009_waits_through_inside_closes_and_uses_later_rejection_bar():
         fixture,
         (
             ("inside-close", "2026-01-01T10:06:20Z", 102.5, 103.0, 102.0, 102.75),
-            ("rejection-close", "2026-01-01T10:06:30Z", 102.75, 103.25, 102.5, 103.1),
+            ("rejection-close", "2026-01-01T11:06:30Z", 102.75, 103.25, 102.5, 103.1),
         ),
     )
 
@@ -1596,7 +1596,7 @@ def test_e009_waits_through_inside_closes_and_uses_later_rejection_bar():
 
     assert candidate is not None
     assert candidate.planned_entry_price == 103.1
-    assert candidate.timing.event_timestamp == ts("2026-01-01T10:06:30Z")
+    assert candidate.timing.event_timestamp == ts("2026-01-01T11:06:30Z")
     assert any(
         source.source_id == "inside-close"
         for source in candidate.timing.source_observations
@@ -1608,7 +1608,7 @@ def test_e009_waits_through_inside_closes_and_uses_later_rejection_bar():
     assert candidate.timing.provenance["fill_status"] == "NOT_A_FILL"
 
 
-def test_e009_earlier_out_of_window_rejection_shadows_later_window_rejection():
+def test_e009_skips_out_of_window_rejection_and_qualifies_later_window_rejection():
     fixture = make_fixture()
     initial_touch_time = ts("2026-01-01T10:06:10Z")
     fixture.inputs = replace(
@@ -1638,15 +1638,87 @@ def test_e009_earlier_out_of_window_rejection_shadows_later_window_rejection():
     early_candidate = resolver.qualify(early_request)
     later_candidate = resolver.qualify(later_request)
 
-    assert early_candidate is not None
+    assert early_candidate is None
     assert later_candidate is not None
-    assert early_candidate.timing.event_timestamp == ts("2026-01-01T10:06:30Z")
-    assert later_candidate.timing.event_timestamp == early_candidate.timing.event_timestamp
-    assert later_candidate.planned_entry_price == early_candidate.planned_entry_price
+    assert any(
+        source.source_id == "first-outside-window"
+        for source in later_candidate.timing.source_observations
+    )
     assert any(
         source.source_id == "later-in-window"
         for source in later_request.visible_inputs.base_observations[-1].timing.source_observations
     )
+
+
+def test_e009_out_of_window_rejection_remains_unresolved_before_later_window():
+    fixture = make_fixture()
+    initial_touch_time = ts("2026-01-01T10:06:10Z")
+    fixture.inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            replace(item, value={**item.value, "close": 102.5, "low": 100.5})
+            if item.timing.event_timestamp == initial_touch_time
+            else item
+            for item in fixture.inputs.base_observations
+        ),
+    )
+    request = _extended_fvg_request(
+        fixture,
+        (
+            ("inside-close", "2026-01-01T10:06:20Z", 102.5, 103.0, 102.0, 102.75),
+            ("first-outside-window", "2026-01-01T10:06:30Z", 102.75, 103.25, 102.5, 103.1),
+        ),
+    )
+
+    assert FVGQuarterRejectionEntryResolver().qualify(request) is None
+
+
+def test_e009_adverse_quarter_after_out_of_window_rejection_invalidates_candidate():
+    fixture = make_fixture()
+    initial_touch_time = ts("2026-01-01T10:06:10Z")
+    fixture.inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            replace(item, value={**item.value, "close": 102.5, "low": 100.5})
+            if item.timing.event_timestamp == initial_touch_time
+            else item
+            for item in fixture.inputs.base_observations
+        ),
+    )
+    request = _extended_fvg_request(
+        fixture,
+        (
+            ("inside-close", "2026-01-01T10:06:20Z", 102.5, 103.0, 102.0, 102.75),
+            ("first-outside-window", "2026-01-01T10:06:30Z", 102.75, 103.25, 102.5, 103.1),
+            ("adverse-quarter", "2026-01-01T11:06:20Z", 102.0, 102.5, 99.0, 99.5),
+            ("later-in-window", "2026-01-01T11:06:30Z", 103.0, 103.3, 102.8, 103.2),
+        ),
+    )
+
+    assert FVGQuarterRejectionEntryResolver().qualify(request) is None
+
+
+def test_e009_cutoff_before_later_window_rejection_cannot_use_future_bar():
+    fixture = make_fixture()
+    initial_touch_time = ts("2026-01-01T10:06:10Z")
+    fixture.inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            replace(item, value={**item.value, "close": 102.5, "low": 100.5})
+            if item.timing.event_timestamp == initial_touch_time
+            else item
+            for item in fixture.inputs.base_observations
+        ),
+    )
+    request = _extended_fvg_request(
+        fixture,
+        (
+            ("inside-close", "2026-01-01T10:06:20Z", 102.5, 103.0, 102.0, 102.75),
+            ("first-outside-window", "2026-01-01T10:06:30Z", 102.75, 103.25, 102.5, 103.1),
+        ),
+    )
+
+    assert FVGQuarterRejectionEntryResolver().qualify(request) is None
 
 
 @pytest.mark.parametrize(
@@ -1669,14 +1741,14 @@ def test_e009_bullish_quarter_threshold_is_close_based_and_strict(
     )
     request = _extended_fvg_request(
         fixture,
-        (("later-rejection", "2026-01-01T10:06:20Z", 102.5, 103.2, 102.2, 103.1),),
+        (("later-rejection", "2026-01-01T11:06:20Z", 102.5, 103.2, 102.2, 103.1),),
     )
 
     candidate = FVGQuarterRejectionEntryResolver().qualify(request)
 
     assert (candidate is not None) is expect_entry
     if candidate is not None:
-        assert candidate.timing.event_timestamp == ts("2026-01-01T10:06:20Z")
+        assert candidate.timing.event_timestamp == ts("2026-01-01T11:06:20Z")
 
 
 @pytest.mark.parametrize(
@@ -1712,14 +1784,14 @@ def test_e009_bearish_quarter_threshold_is_close_based_and_strict(
     )
     request = _extended_fvg_request(
         fixture,
-        (("later-bearish-rejection", "2026-01-01T10:06:20Z", 101.5, 102.0, 100.5, 100.9),),
+        (("later-bearish-rejection", "2026-01-01T11:06:20Z", 101.5, 102.0, 100.5, 100.9),),
     )
 
     candidate = FVGQuarterRejectionEntryResolver().qualify(request)
 
     assert (candidate is not None) is expect_entry
     if candidate is not None:
-        assert candidate.timing.event_timestamp == ts("2026-01-01T10:06:20Z")
+        assert candidate.timing.event_timestamp == ts("2026-01-01T11:06:20Z")
 
 
 def test_supplied_interaction_at_mss_confirmation_cannot_qualify_entry():

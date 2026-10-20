@@ -25,6 +25,7 @@ from src.replay_subject import ReplaySubject
 from src.sniper_setup import PrecisionState
 from src.dealing_range import DealingRange, RangeLocation
 import src.core_v1_pipeline as pipeline_module
+import src.core_v1_retracement as retracement_module
 from tests.test_core_v1_hypothesis import (
     FixedInvalidationResolver,
     FixedTargetResolver,
@@ -1090,6 +1091,8 @@ def test_supplied_foreign_liquidity_reference_is_not_accepted_by_mss():
 
 def test_pipeline_runs_experimental_entry_through_structural_risk_gates(monkeypatch):
     fixture, kwargs = pipeline_fixture()
+    monkeypatch.setattr(pipeline_module, "core_v1_entry_session", lambda _: "LONDON")
+    monkeypatch.setattr(retracement_module, "core_v1_entry_session", lambda _: "LONDON")
     calls = []
 
     def derive(inputs, *, displacement, mss, derive_visible):

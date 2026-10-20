@@ -22,6 +22,7 @@ from .core_v1_reactionary_zones import (
     CoreV1OrderBlockObservation,
     CoreV1PDArrayObservation,
 )
+from .core_v1_sessions import core_v1_entry_session
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
 from .displacement import Direction
 from .fvg import FVGDirection
@@ -568,6 +569,8 @@ class FVGQuarterRejectionEntryResolver:
                 rejected = close < fvg.lower_bound
             evidence_sources.append(source)
             if rejected:
+                if core_v1_entry_session(item.timing.event_timestamp) is None:
+                    continue
                 sources = _unique_sources(evidence_sources)
                 timing = EvidenceTiming.from_inputs(
                     event_timestamp=item.timing.event_timestamp,
