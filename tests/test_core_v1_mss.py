@@ -515,6 +515,34 @@ def test_mss_is_unresolved_when_displacement_direction_conflicts_with_swept_side
     assert "conflicts with displacement direction" in result.reason
 
 
+def test_mss_is_unresolved_when_structural_point_type_conflicts_with_direction():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    values["structural_point"] = replace(
+        values["structural_point"],
+        kind=SwingType.LOW,
+    )
+
+    result = evaluate(inputs, values)
+
+    assert result.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert "Structural point type conflicts" in result.reason
+
+
+def test_mss_is_unresolved_when_break_direction_conflicts_with_displacement():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    values["structural_break"] = replace(
+        values["structural_break"],
+        direction=Direction.BEARISH,
+    )
+
+    result = evaluate(inputs, values)
+
+    assert result.status is MSSStatus.NOT_MSS_UNRESOLVED
+    assert "Structural break direction conflicts" in result.reason
+
+
 def test_mss_component_subject_validation_uses_subject_id():
     canonical = subject()
     reconstructed = ReplaySubject.from_dict(canonical.to_dict())

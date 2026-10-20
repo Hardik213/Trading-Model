@@ -585,6 +585,16 @@ def evaluate_core_v1_mss(
             inputs,
             "Liquidity side conflicts with displacement direction.",
         )
+    expected_point_kind = (
+        SwingType.HIGH
+        if displacement.observation.direction is Direction.BULLISH
+        else SwingType.LOW
+    )
+    if point.kind is not expected_point_kind:
+        return _unresolved(
+            inputs,
+            "Structural point type conflicts with displacement direction.",
+        )
 
     assert liquidity_event.breach is not None
     breach_timestamp = liquidity_event.breach.timing.event_timestamp
@@ -608,6 +618,11 @@ def evaluate_core_v1_mss(
     _validate_component_subject(structural_break.subject, inputs.subject, "Structural break")
     if structural_break.structural_point is not point:
         raise ValueError("Structural break must reference the supplied structural point.")
+    if structural_break.direction is not displacement.observation.direction:
+        return _unresolved(
+            inputs,
+            "Structural break direction conflicts with displacement direction.",
+        )
     structural_break.timing.validate_for_subject(inputs.subject)
     _validate_base_visibility(structural_break.timing, inputs.subject, "Structural break")
     _validate_visible_lineage(structural_break.timing, inputs, "Structural break")
