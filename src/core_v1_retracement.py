@@ -766,6 +766,25 @@ def _validate_supplied_evidence(request: CoreV1RetracementInputs) -> None:
         _validate_zone(request.zone, request.visible_inputs)
     if request.interaction is not None:
         _validate_interaction(request.interaction, request.visible_inputs)
+        if (
+            isinstance(request.zone, CoreV1FVGObservation)
+            and request.mss is not None
+            and request.mss.status is MSSStatus.MSS
+        ):
+            first_interaction = derive_visible_fvg_interaction(
+                request.visible_inputs, request.zone, request.mss
+            )
+            if (
+                first_interaction is None
+                or request.interaction.interaction_timestamp
+                != first_interaction.interaction_timestamp
+                or request.interaction.timing.source_observations
+                != first_interaction.timing.source_observations
+                or request.interaction.price is not None
+            ):
+                raise ValueError(
+                    "Supplied FVG interaction must match the first visible post-MSS overlap and cannot infer an exact touch price."
+                )
     if request.context is not None:
         _validate_context(request.context, request.visible_inputs)
     if request.draw_on_liquidity is not None:

@@ -432,7 +432,7 @@ def make_fixture() -> Fixture:
             "2026-01-01T10:06:10Z",
             interaction_sources,
         ),
-        price=102.0,
+        price=None,
     )
     entry_sources = tuple(sources.values())
     planned_entry = CoreV1PlannedEntry(
@@ -867,7 +867,7 @@ def test_resolver_is_given_context_only_after_governed_prerequisites():
 
 def test_fvg_touch_and_plausible_complete_story_without_policy_is_not_a_trade():
     fixture = make_fixture()
-    assert fixture.zone.fvg.contains(fixture.interaction.price)
+    assert fixture.interaction.price is None
     result = evaluate(fixture, resolver=None)
     assert result.state is PrecisionState.DEVELOPING
     assert result.planned_entry is None
@@ -1275,6 +1275,55 @@ def test_entry_resolver_cannot_bypass_missing_visible_zone_interaction():
     assert "post-availability interaction are required" in result.reason
 
 
+def test_supplied_later_fvg_touch_cannot_bypass_first_nonqualifying_overlap():
+    fixture = make_fixture()
+    first_touch_time = ts("2026-01-01T10:05:30Z")
+    first_touch_source = make_source("first-nonqualifying-touch", first_touch_time.isoformat())
+    first_touch = SubjectVisibleObservation(
+        value={"open": 102.5, "high": 104.0, "low": 102.0, "close": 102.5},
+        timing=make_timing(first_touch_time.isoformat(), (first_touch_source,)),
+        scope=ObservationScope.BASE,
+    )
+    inputs = replace(
+        fixture.inputs,
+        base_observations=tuple(
+            sorted(
+                (*fixture.inputs.base_observations, first_touch),
+                key=lambda item: item.timing.event_timestamp,
+            )
+        ),
+    )
+    context, draw_on_liquidity = governed_directional_evidence(
+        inputs,
+        fixture.displacement.observation.direction,
+        before=fixture.liquidity.breach.timing.event_timestamp,
+    )
+    resolver = FixedEntryResolver(fixture.planned_entry)
+
+    with pytest.raises(ValueError, match="first visible post-MSS overlap"):
+        evaluate_core_v1_retracement(
+            inputs,
+            mss=fixture.mss,
+            liquidity=fixture.liquidity,
+            displacement=fixture.displacement,
+            context=context,
+            draw_on_liquidity=draw_on_liquidity,
+            zone=fixture.zone,
+            interaction=fixture.interaction,
+            resolver=resolver,
+        )
+
+    assert resolver.received is None
+
+
+def test_supplied_fvg_interaction_cannot_claim_exact_touch_price():
+    fixture = make_fixture()
+    interaction = replace(fixture.interaction, price=102.0)
+
+    with pytest.raises(ValueError, match="cannot infer an exact touch price"):
+        evaluate(fixture, interaction=interaction, resolver=FixedEntryResolver(None))
+
+
 def test_experimental_first_touch_close_back_out_yields_planned_price_not_fill():
     fixture = make_fixture()
     context, draw_on_liquidity = governed_directional_evidence(
@@ -1388,18 +1437,15 @@ def test_supplied_interaction_at_mss_confirmation_cannot_qualify_entry():
         ),
     )
 
-    result = evaluate_core_v1_retracement(
-        fixture.inputs,
-        mss=fixture.mss,
-        liquidity=fixture.liquidity,
-        displacement=fixture.displacement,
-        context=context,
-        draw_on_liquidity=draw_on_liquidity,
-        zone=fixture.zone,
-        interaction=early_interaction,
-        resolver=FixedEntryResolver(fixture.planned_entry),
-    )
-
-    assert result.state is PrecisionState.DEVELOPING
-    assert result.planned_entry is None
-    assert "strictly after MSS confirmation" in result.reason
+    with pytest.raises(ValueError, match="first visible post-MSS overlap"):
+        evaluate_core_v1_retracement(
+            fixture.inputs,
+            mss=fixture.mss,
+            liquidity=fixture.liquidity,
+            displacement=fixture.displacement,
+            context=context,
+            draw_on_liquidity=draw_on_liquidity,
+            zone=fixture.zone,
+            interaction=early_interaction,
+            resolver=FixedEntryResolver(fixture.planned_entry),
+        )
