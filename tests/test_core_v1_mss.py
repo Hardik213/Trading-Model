@@ -130,9 +130,9 @@ def visible_inputs() -> tuple[
         (102.0, 107.0, 94.0, 106.0),
         (103.0, 108.0, 96.0, 107.0),
         (104.0, 109.0, 95.0, 108.0),
-        (105.0, 110.0, 94.0, 109.0),
+        (105.0, 110.0, 94.0, 104.0),
         (106.0, 111.0, 93.0, 110.0),
-        (107.0, 112.0, 92.0, 111.0),
+        (107.0, 112.0, 92.0, 112.0),
     )
     observations = tuple(
         SubjectVisibleObservation(
@@ -351,6 +351,46 @@ def _visible_price_at(
     return float(observation.value[field])
 
 
+def _with_bar_values(inputs, timestamp, **updates):
+    observations = tuple(
+        replace(observation, value={**observation.value, **updates})
+        if observation.timing.event_timestamp == timestamp
+        else observation
+        for observation in inputs.base_observations
+    )
+    return replace(inputs, base_observations=observations)
+
+
+def _with_intervening_bars(inputs, event_times):
+    added = []
+    for index, event_time in enumerate(event_times):
+        bar_source = source(f"intervening-{index}", event_time)
+        added.append(
+            SubjectVisibleObservation(
+                value={
+                    "source_id": bar_source.source_id,
+                    "open": 107.0,
+                    "high": 110.0,
+                    "low": 106.0,
+                    "close": 108.0,
+                },
+                timing=timing(event_time, (bar_source,), base_scoped=True),
+                scope=ObservationScope.BASE,
+            )
+        )
+    observations = tuple(
+        sorted(
+            (*inputs.base_observations, *added),
+            key=lambda observation: observation.timing.event_timestamp,
+        )
+    )
+    return replace(inputs, base_observations=observations), tuple(
+        source
+        for observation in added
+        for source in observation.timing.source_observations
+    )
+
+
 def test_valid_mss_requires_all_governed_components():
     inputs, sources = visible_inputs()
     values = components(inputs, sources)
@@ -494,6 +534,110 @@ def test_mss_rejects_forged_not_sweep_classification():
     )
 
     with pytest.raises(ValueError, match="full assessment recomputed"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_break_price_not_matching_visible_close():
+    inputs, sources = visible_inputs()
+    values = components(inputs, sources)
+    forged_break = replace(
+        values["structural_break"],
+        break_price=values["structural_break"].break_price + 1.0,
+    )
+    values["structural_break"] = forged_break
+    values["confirmation"] = replace(
+        values["confirmation"],
+        structural_break=forged_break,
+    )
+
+    with pytest.raises(ValueError, match="does not match its visible close"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_ambiguous_ohlc_field_names():
+    inputs, sources = visible_inputs()
+    inputs = _with_bar_values(
+        inputs,
+        sources["displacement-confirmation"].event_timestamp,
+        Close=104.0,
+    )
+    values = components(inputs, sources)
+
+    with pytest.raises(ValueError, match="ambiguous field names"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_later_break_when_an_earlier_visible_close_already_broke():
+    inputs, sources = visible_inputs()
+    inputs = _with_bar_values(
+        inputs,
+        sources["displacement-confirmation"].event_timestamp,
+        close=106.0,
+    )
+    values = components(inputs, sources)
+
+    with pytest.raises(ValueError, match="not the first visible close"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_follow_through_that_does_not_close_beyond_break_extreme():
+    inputs, sources = visible_inputs()
+    inputs = _with_bar_values(
+        inputs,
+        sources["follow-through"].event_timestamp,
+        close=111.0,
+    )
+    values = components(inputs, sources)
+
+    with pytest.raises(ValueError, match="does not close beyond the break-bar extreme"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_follow_through_after_close_back_through_structural_point():
+    inputs, sources = visible_inputs()
+    inputs = _with_bar_values(
+        inputs,
+        sources["follow-through"].event_timestamp,
+        close=105.0,
+    )
+    values = components(inputs, sources)
+
+    with pytest.raises(ValueError, match="invalidated before follow-through"):
+        evaluate(inputs, values)
+
+
+def test_mss_rejects_confirmation_more_than_two_visible_bars_after_break():
+    inputs, sources = visible_inputs()
+    inputs, intervening_sources = _with_intervening_bars(
+        inputs,
+        ("2026-01-01T10:03:30Z", "2026-01-01T10:04:00Z"),
+    )
+    values = components(inputs, sources)
+    confirmation = values["confirmation"]
+    values["confirmation"] = replace(
+        confirmation,
+        timing=replace(
+            confirmation.timing,
+            source_observations=(
+                *confirmation.timing.source_observations,
+                *intervening_sources,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="within the next two visible bars"):
+        evaluate(inputs, values)
+
+
+def test_mss_follow_through_provenance_retains_intervening_visible_bars():
+    inputs, sources = visible_inputs()
+    inputs, _ = _with_intervening_bars(
+        inputs,
+        ("2026-01-01T10:04:00Z",),
+    )
+    values = components(inputs, sources)
+
+    with pytest.raises(ValueError, match="every intervening visible bar"):
         evaluate(inputs, values)
 
 
@@ -814,6 +958,7 @@ def test_causal_ordering_violation_is_rejected(override, message):
         match=(
             "Causal MSS ordering violation|cannot precede|availability cannot precede"
             "|provenance must identify|Breach event must occur strictly after level availability"
+            "|not the first visible close"
         ),
     ):
         values = components(inputs, sources, **override)

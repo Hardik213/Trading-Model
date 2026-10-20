@@ -638,6 +638,14 @@ def evaluate_core_v1_mss(
     follow.timing.validate_for_subject(inputs.subject)
     _validate_base_visibility(follow.timing, inputs.subject, "MSS confirmation")
     _validate_visible_lineage(follow.timing, inputs, "MSS confirmation")
+    _validate_visible_break_and_follow_through(
+        inputs,
+        displacement_timestamp=displacement_timing.event_timestamp,
+        structural_point=point,
+        structural_break=structural_break,
+        confirmation=follow,
+        direction=displacement.observation.direction,
+    )
 
     liquidity_timing = liquidity_event.reaction.timing
     ordered = (
@@ -764,6 +772,139 @@ def _validate_component_subject(
 ) -> None:
     if not same_subject_id(actual, expected):
         raise ValueError(f"{name} does not preserve the exact ReplaySubject.")
+
+
+def _validate_visible_break_and_follow_through(
+    inputs: SubjectVisibleInputs,
+    *,
+    displacement_timestamp: pd.Timestamp,
+    structural_point: CoreV1StructuralPoint,
+    structural_break: CoreV1StructuralBreak,
+    confirmation: CoreV1MSSConfirmation,
+    direction: Direction,
+) -> None:
+    confirmation_timestamp = confirmation.timing.confirmation_timestamp
+    if confirmation_timestamp is None:
+        raise ValueError("MSS follow-through requires a confirmation timestamp.")
+    break_timestamp = structural_break.timing.event_timestamp
+    if break_timestamp <= displacement_timestamp:
+        raise ValueError("Structural break must occur strictly after displacement.")
+
+    visible_bars = []
+    visible_observations = {}
+    for observation in inputs.base_observations:
+        timestamp = observation.timing.event_timestamp
+        if not displacement_timestamp < timestamp <= confirmation_timestamp:
+            continue
+        if (
+            timestamp > inputs.subject.base_bar_timestamp
+            or observation.timing.availability_timestamp
+            > inputs.subject.availability_timestamp
+        ):
+            raise ValueError("MSS OHLC evidence exceeds the ReplaySubject cutoff.")
+        bar_sources = observation.timing.source_observations
+        if not bar_sources or any(
+            not source.is_base_timeframe
+            or source.event_timestamp != timestamp
+            or source.base_bar_timestamp != timestamp
+            or source.availability_timestamp
+            > inputs.subject.availability_timestamp
+            for source in bar_sources
+        ):
+            raise ValueError("MSS OHLC provenance must identify visible base bars.")
+        if not isinstance(observation.value, Mapping):
+            raise ValueError("MSS OHLC evidence must be visible and unambiguous.")
+        normalized = [str(key).lower() for key in observation.value]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("MSS OHLC evidence contains ambiguous field names.")
+        values = dict(zip(normalized, observation.value.values()))
+        if not {"open", "high", "low", "close"}.issubset(values):
+            raise ValueError("MSS OHLC evidence must include open, high, low, and close.")
+        try:
+            bar = {
+                name: float(values[name])
+                for name in ("open", "high", "low", "close")
+            }
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("MSS OHLC evidence must be finite and numeric.") from exc
+        if any(not isfinite(value) for value in bar.values()) or (
+            bar["high"] < max(bar["open"], bar["close"], bar["low"])
+            or bar["low"] > min(bar["open"], bar["close"], bar["high"])
+        ):
+            raise ValueError("MSS OHLC evidence is malformed.")
+        visible_bars.append((timestamp, bar))
+        visible_observations[timestamp] = observation
+
+    timestamps = [timestamp for timestamp, _ in visible_bars]
+    if any(right <= left for left, right in zip(timestamps, timestamps[1:])):
+        raise ValueError("MSS OHLC evidence timestamps must be strictly increasing.")
+    break_positions = [
+        index for index, (timestamp, _) in enumerate(visible_bars)
+        if timestamp == break_timestamp
+    ]
+    confirmation_positions = [
+        index for index, (timestamp, _) in enumerate(visible_bars)
+        if timestamp == confirmation_timestamp
+    ]
+    if len(break_positions) != 1 or len(confirmation_positions) != 1:
+        raise ValueError("MSS break and confirmation must match visible base bars.")
+
+    break_observation = visible_observations[break_timestamp]
+    if any(
+        source not in structural_break.timing.source_observations
+        for source in break_observation.timing.source_observations
+    ):
+        raise ValueError("Structural-break provenance must include its visible bar sources.")
+    confirmation_observation = visible_observations[confirmation_timestamp]
+    confirmation_sources = confirmation.timing.source_observations
+    if any(
+        source not in confirmation_sources
+        for source in confirmation_observation.timing.source_observations
+    ):
+        raise ValueError("Follow-through provenance must include its visible bar sources.")
+
+    point_price = float(structural_point.price)
+    qualifies = lambda close: (
+        close > point_price if direction is Direction.BULLISH else close < point_price
+    )
+    first_break = next(
+        (
+            timestamp
+            for timestamp, bar in visible_bars
+            if qualifies(bar["close"])
+        ),
+        None,
+    )
+    break_index = break_positions[0]
+    if first_break != break_timestamp:
+        raise ValueError("Structural break is not the first visible close beyond the point.")
+    break_bar = visible_bars[break_index][1]
+    if float(structural_break.break_price) != break_bar["close"]:
+        raise ValueError("Structural break price does not match its visible close.")
+
+    confirmation_index = confirmation_positions[0]
+    if not break_index < confirmation_index <= break_index + 2:
+        raise ValueError("MSS follow-through must occur within the next two visible bars.")
+    for timestamp, _ in visible_bars[break_index + 1 : confirmation_index]:
+        intervening = visible_observations[timestamp]
+        if any(
+            source not in confirmation_sources
+            for source in intervening.timing.source_observations
+        ):
+            raise ValueError(
+                "Follow-through provenance must retain every intervening visible bar."
+            )
+    confirmation_bar = visible_bars[confirmation_index][1]
+    for _, bar in visible_bars[break_index + 1 : confirmation_index + 1]:
+        if not qualifies(bar["close"]):
+            raise ValueError("MSS break is invalidated before follow-through confirmation.")
+    confirms = (
+        confirmation_bar["close"] > break_bar["high"]
+        if direction is Direction.BULLISH
+        else confirmation_bar["close"] < break_bar["low"]
+    )
+    if not confirms:
+        raise ValueError("MSS follow-through does not close beyond the break-bar extreme.")
 
 
 def _validate_base_visibility(

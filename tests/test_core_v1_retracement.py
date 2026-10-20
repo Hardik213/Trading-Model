@@ -100,6 +100,15 @@ def make_timing(
     )
 
 
+def _visible_close_at(inputs: SubjectVisibleInputs, timestamp: pd.Timestamp) -> float:
+    (observation,) = tuple(
+        item
+        for item in inputs.base_observations
+        if item.timing.event_timestamp == timestamp
+    )
+    return float(observation.value["close"])
+
+
 @dataclass
 class Fixture:
     subject: ReplaySubject
@@ -276,11 +285,14 @@ def make_fixture() -> Fixture:
     for index, source in enumerate(ordered_base_sources[len(support_bars):]):
         high = 107.0 + index
         low = 94.0 if index == 0 else 95.0 - index
+        close = high if source.source_id == "follow-through" else high - 1.0
+        if source.source_id == "displacement-confirmation":
+            close = 104.0
         ohlc_by_source[source.source_id] = {
             "open": high - 2.0,
             "high": high,
             "low": low,
-            "close": high - 1.0,
+            "close": close,
         }
     visible = tuple(
         SubjectVisibleObservation(
@@ -358,22 +370,29 @@ def make_fixture() -> Fixture:
     structural_break = CoreV1StructuralBreak(
         current,
         point,
-        108.0,
+        _visible_close_at(inputs, ts("2026-01-01T10:03:00Z")),
         make_timing(
             "2026-01-01T10:03:00Z",
             (*point.timing.source_observations, sources["break"]),
         ),
         direction=Direction.BULLISH,
     )
+    confirmation_observations = list(structural_break.timing.source_observations)
+    for observation in inputs.base_observations:
+        if (
+            structural_break.timing.event_timestamp
+            < observation.timing.event_timestamp
+            <= ts("2026-01-01T10:05:00Z")
+        ):
+            for source in observation.timing.source_observations:
+                if source not in confirmation_observations:
+                    confirmation_observations.append(source)
     confirmation = CoreV1MSSConfirmation(
         current,
         structural_break,
         make_timing(
             "2026-01-01T10:03:00Z",
-            (
-                *structural_break.timing.source_observations,
-                sources["follow-through"],
-            ),
+            tuple(confirmation_observations),
             confirmation="2026-01-01T10:05:00Z",
             availability=current.availability_timestamp.isoformat(),
         ),

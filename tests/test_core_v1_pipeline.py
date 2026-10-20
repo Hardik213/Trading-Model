@@ -178,13 +178,31 @@ def pipeline_fixture():
         inputs,
         levels=(fixture.liquidity.level,),
     )
+    confirmation = fixture.mss.confirmation
+    confirmation_sources = list(confirmation.timing.source_observations)
+    for observation in inputs.base_observations:
+        if (
+            fixture.mss.structural_break.timing.event_timestamp
+            < observation.timing.event_timestamp
+            <= confirmation.timing.confirmation_timestamp
+        ):
+            for source in observation.timing.source_observations:
+                if source not in confirmation_sources:
+                    confirmation_sources.append(source)
+    confirmation = replace(
+        confirmation,
+        timing=replace(
+            confirmation.timing,
+            source_observations=tuple(confirmation_sources),
+        ),
+    )
     mss = evaluate_core_v1_mss(
         inputs,
         structural_point=fixture.mss.structural_point,
         liquidity_event=liquidity,
         displacement=fixture.displacement,
         structural_break=fixture.mss.structural_break,
-        confirmation=fixture.mss.confirmation,
+        confirmation=confirmation,
     )
     fixture.liquidity = liquidity
     fixture.mss = mss
