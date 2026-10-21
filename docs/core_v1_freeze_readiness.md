@@ -1,9 +1,9 @@
 # Core v1 freeze-readiness record
 
-**Audit date:** 2026-10-20  
+**Audit date:** 2026-10-21
 **Branch:** `wip/step3d-recovered`  
 **Starting HEAD:** `f479f0d22b10e1394b9f865271415bbe439a8537`  
-**Latest development updates:** E009 implementation `9e7c5c140b91833017e5a26e43ba28c08831427a`; session trade-management record `44ae64366ca61562b65e6f516772662cb0de67c4`; DST-aware session gate `8d66de9`; focused session verification added in the current review.
+**Latest development updates:** E009 implementation `9e7c5c140b91833017e5a26e43ba28c08831427a`; session trade-management record `44ae64366ca61562b65e6f516772662cb0de67c4`; DST-aware session gate `8d66de9`; focused session verification and the canonical cross-session pipeline regression were added in the current review.
 **Scope:** Engineering readiness review only. No holdout run is authorized. No raw CSV rows, strategy outcomes, performance metrics, charts, replay, backtest, or strategy evaluation was accessed.
 
 ## Stage status
@@ -59,13 +59,34 @@ python -m pytest tests/test_core_v1_sessions.py tests/test_core_v1_pipeline.py t
 
 Result: **292 passed in 8.68s**. No full-suite run was performed. `git diff --check` passed.
 
+Canonical cross-session integration verification:
+
+```text
+python -m pytest tests/test_core_v1_cross_session_pipeline.py tests/test_core_v1_retracement.py tests/test_core_v1_pipeline.py tests/test_core_v1_sessions.py
+```
+
+Result: **133 passed in 2.47s**. The integration fixture uses synthetic invalidation and target evidence only to isolate the cross-session lifecycle; no full-suite run was performed.
+
 E009 session-close lifecycle audit verification:
 
 ```text
 python -m pytest tests/test_core_v1_retracement.py tests/test_core_v1_pipeline.py tests/test_core_v1_sessions.py
 ```
 
-Result: **132 passed in 4.30s**. The E009 characterization now uses the actual resolver and session policy across successive cutoffs: an out-of-window rejection is skipped, a later in-window rejection qualifies with the skipped source retained, adverse-quarter invalidation still wins, and future bars remain unavailable before their cutoff. The session-boundary test is named for its actual outside-window behavior; the six-minutes-after-endpoint fixture is no longer described as an exact endpoint case.
+Result: **132 passed in 4.30s**. The E009 characterization uses the actual resolver and session policy across successive cutoffs: an out-of-window rejection is skipped, a later in-window rejection qualifies with the skipped source retained, adverse-quarter invalidation still wins, and future bars remain unavailable before their cutoff. The session-boundary test is named for its actual outside-window behavior; the six-minutes-after-endpoint fixture is no longer described as an exact endpoint case.
+
+## Next safe roadmap work
+
+The configuration audit confirms that `configs/core_v1_development.json` records the owner-approved cross-session policy, the half-open DST-aware windows, normal TP/SL management after entry, and an explicitly unresolved candidate lifetime. No maximum window count, trading-time lifetime, or expiry rule is inferred by this review.
+
+The next safe items remain freeze-readiness work rather than performance evaluation:
+
+1. **Owner decision:** select or continue to defer the E009 candidate maximum lifetime/expiry policy. Implementation must wait for that decision; no bound is assumed here.
+2. **Owner decisions:** resolve breached-but-unrejected liquidity consumption and the deterministic dealing-range anchor policy.
+3. **Verified-runtime implementation:** confirm the frozen runtime's `America/New_York` IANA timezone data and, only after a verified XAUUSD calendar is supplied, implement the already-recorded trading-time liquidity lifetime semantics.
+4. **Freeze bookkeeping:** complete verified account/execution inputs and the clean configuration/build/run record after the strategy decisions above are settled.
+
+None of these items authorizes replay, backtest, performance evaluation, or holdout access.
 
 ## Readiness conclusion
 
