@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "configuration_status": "DEVELOPMENT_NOT_FROZEN",
+  "model": {
+    "model_id": "ICT-2022-CORE-V1",
+    "instrument": "XAUUSD",
+    "base_timeframe": "5M",
+    "base_timeframe_status": "DOCUMENTED_DEFAULT_NOT_RUN_CONFIGURED",
+    "variant_scope": "ICT_2022_CORE_V1_ONLY",
+    "mmxm_2023_status": "SEPARATE_FUTURE_VARIANT_NOT_IN_CORE_V1"
+  },
+  "periods_utc": {
+    "development": {
+      "start_inclusive": "2022-01-01T00:00:00Z",
+      "end_exclusive": "2025-01-01T00:00:00Z"
+    },
+    "holdout": {
+      "start_inclusive": "2025-01-01T00:00:00Z",
+      "end_exclusive": "2026-01-01T00:00:00Z",
+      "authorization": "BLOCKED"
+    }
+  },
+  "strategy_rules": {
+    "displacement": {
+      "detector": "src.displacement.detect_displacement",
+      "baseline_bars": 20,
+      "minimum_body_ratio": 0.6,
+      "minimum_range_expansion": 1.25,
+      "minimum_bullish_close_location": 0.7,
+      "maximum_bearish_close_location": 0.3,
+      "follow_through_bars": 2,
+      "direction_source": "CONFIRMED_LIQUIDITY_EVENT",
+      "candidate_selection": "LATEST_ELIGIBLE_CONFIRMATION_THEN_EVENT_TIME"
+    },
+    "retracement_entry": {
+      "interaction": "FIRST_VISIBLE_POST_MSS_FVG_OVERLAP",
+      "exact_touch_price": "NOT_INFERRED",
+      "entry_rule_id": "E009-20261020-FVG-DRT-QUARTER-REJECTION",
+      "entry_rule_status": "OWNER_SPECIFIED_DEVELOPMENT_HYPOTHESIS_NOT_PERFORMANCE_EVALUATED",
+      "planned_entry_is_fill": false,
+      "cross_session_rejection_policy": "SKIP_OUT_OF_WINDOW_REJECTION_CONTINUE_TO_FIRST_LATER_IN_WINDOW_REJECTION",
+      "candidate_lifetime_policy": "THREE_ELIGIBLE_WINDOWS_EXCLUSIVE_THIRD_WINDOW_END",
+      "candidate_lifetime_window_count": 3,
+      "candidate_lifetime_counting": "INTERACTION_CONTAINING_WINDOW_OR_NEXT_ELIGIBLE_WINDOW",
+      "candidate_expiry_basis": "VISIBLE_EVENT_TIMESTAMP_AND_DST_AWARE_SESSION_POLICY",
+      "candidate_expiry_at_boundary": "FAIL_CLOSED_NO_ENTRY",
+      "candidate_expiry_open_position": "NO_EFFECT_NORMAL_TP_SL"
+    },
+    "lifetime_implementation": "IMPLEMENTED_DEVELOPMENT_ONLY_THREE_ELIGIBLE_WINDOWS",
+    "breached_without_rejection_consumption": "UNRESOLVED",
+    "dealing_range_anchor_policy": "CALLER_GOVERNED_UNRESOLVED_FOR_FREEZE",
+    "strategy_session_gate": {
+      "status": "IMPLEMENTED_DEVELOPMENT_ONLY",
+      "timezone": "America/New_York",
+      "interval_convention": "[START_INCLUSIVE, END_EXCLUSIVE)",
+      "entry_timestamp_basis": "PLANNED_ENTRY_EVENT_TIMESTAMP",
+      "windows_local": [
+        {
+          "session": "LONDON_ICT_KILLZONE_PLUS_PRECEDING_HOUR",
+          "start": "01:00",
+          "end": "05:00"
+        },
+        {
+          "session": "NEW_YORK_ICT_KILLZONE_PLUS_PRECEDING_HOUR",
+          "start": "06:00",
+          "end": "10:00"
+        }
+      ],
+      "open_trade_management_after_window": "NORMAL_TP_SL"
+    }
+  },
+  "execution_configuration": {
+    "mode": "HISTORICAL_TICK_SIMULATION_ONLY",
+    "maximum_concurrent_positions": 1,
+    "risk_ceiling_fraction": 0.01,
+    "starting_equity": null,
+    "account_currency": null,
+    "contract_size": null,
+    "minimum_quantity": null,
+    "quantity_step": null,
+    "account_currency_conversion_policy": null,
+    "commission_per_unit_per_side": null,
+    "slippage_per_unit_per_side": null,
+    "live_broker_enabled": false
+  },
+  "freeze_blockers": [
+    "E009 three-window lifetime is development-tested but remains subject to independent freeze readiness; no performance evaluation is authorized.",
+    "Consumption behavior for a breached but unrejected liquidity level remains unresolved.",
+    "A deterministic dealing-range anchor policy is not selected.",
+    "The session gate is a development implementation only; verify the IANA timezone database in the frozen runtime before any evaluation.",
+    "Execution configuration requires confirmed account currency, contract size, quantity rules, conversion policy, commission, and slippage.",
+    "Starting equity and exact run-time execution configuration are not recorded.",
+    "No frozen strategy configuration hash, clean frozen build record, or run environment record exists.",
+    "No holdout authorization has been given."
+  ]
+}

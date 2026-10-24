@@ -19,6 +19,9 @@ from .core_v1_reactionary_zones import (
     CoreV1PDArrayObservation,
 )
 from .evidence_timing import EvidenceSourceObservation, EvidenceTiming
+from .core_v1_sessions import core_v1_candidate_expiry, core_v1_entry_session
+from .displacement import Direction
+from .fvg import FVGDirection
 from .replay_subject import ReplaySubject, same_subject_id
 # Reuse these four state labels only; no precision-gate rules are imported.
 from .sniper_setup import PrecisionState
@@ -329,6 +332,229 @@ class RetracementEntryResolver(Protocol):
         self,
         inputs: CoreV1RetracementInputs,
     ) -> CoreV1PlannedEntry | None: ...
+
+
+
+class FVGQuarterRejectionEntryResolver:
+    """Experimental E009: wait for a close back out while the FVG holds its quarter."""
+
+    def qualify(
+        self,
+        inputs: CoreV1RetracementInputs,
+    ) -> CoreV1PlannedEntry | None:
+        if not isinstance(inputs, CoreV1RetracementInputs):
+            raise TypeError("inputs must be CoreV1RetracementInputs.")
+        zone = inputs.zone
+        interaction = inputs.interaction
+        displacement = inputs.displacement
+        mss = inputs.mss
+        if (
+            not isinstance(zone, CoreV1FVGObservation)
+            or interaction is None
+            or interaction.zone is not zone
+            or displacement is None
+            or displacement.observation is None
+            or displacement.observation.direction not in {Direction.BULLISH, Direction.BEARISH}
+            or mss is None
+            or mss.status is not MSSStatus.MSS
+            or mss.confirmation_timestamp is None
+        ):
+            return None
+
+        direction = displacement.observation.direction
+        if (
+            direction is Direction.BULLISH
+            and zone.fvg.direction is not FVGDirection.BULLISH
+        ) or (
+            direction is Direction.BEARISH
+            and zone.fvg.direction is not FVGDirection.BEARISH
+        ):
+            return None
+        if (
+            interaction.interaction_timestamp <= zone.timing.availability_timestamp
+            or interaction.interaction_timestamp <= mss.confirmation_timestamp
+        ):
+            return None
+
+        first_interaction = derive_visible_fvg_interaction(
+            inputs.visible_inputs, zone, mss
+        )
+        if (
+            first_interaction is None
+            or first_interaction.interaction_timestamp != interaction.interaction_timestamp
+            or first_interaction.timing.source_observations
+            != interaction.timing.source_observations
+            or interaction.price is not None
+        ):
+            return None
+
+        expiry = core_v1_candidate_expiry(interaction.interaction_timestamp)
+        if expiry is None:
+            return None
+
+        eligible = tuple(
+            item
+            for item in inputs.visible_inputs.base_observations
+            if item.timing.event_timestamp >= interaction.interaction_timestamp
+        )
+        if not eligible or eligible[0].timing.event_timestamp != interaction.interaction_timestamp:
+            return None
+        if any(
+            right.timing.event_timestamp <= left.timing.event_timestamp
+            for left, right in zip(eligible, eligible[1:])
+        ):
+            return None
+
+        fvg = zone.fvg
+        width = fvg.upper_bound - fvg.lower_bound
+        if not isfinite(width) or width <= 0:
+            return None
+        invalidation = (
+            fvg.lower_bound + width * 0.25
+            if direction is Direction.BULLISH
+            else fvg.lower_bound + width * 0.75
+        )
+        evidence_sources = list(_prerequisite_sources(inputs))
+        for item in eligible:
+            if item.timing.event_timestamp >= expiry:
+                break
+            if item.timing.availability_timestamp > inputs.visible_inputs.subject.availability_timestamp:
+                continue
+            if not isinstance(item.value, Mapping) or len(item.timing.source_observations) != 1:
+                return None
+            source = item.timing.source_observations[0]
+            if (
+                not source.is_base_timeframe
+                or source.event_timestamp != item.timing.event_timestamp
+                or source.base_bar_timestamp != item.timing.event_timestamp
+            ):
+                return None
+            values = {str(key).lower(): value for key, value in item.value.items()}
+            if not {"open", "high", "low", "close"}.issubset(values):
+                return None
+            try:
+                open_, high, low, close = (
+                    float(values[name]) for name in ("open", "high", "low", "close")
+                )
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                any(not isfinite(value) for value in (open_, high, low, close))
+                or high < max(open_, close, low)
+                or low > min(open_, close, high)
+            ):
+                return None
+            close = float(values["close"])
+            if direction is Direction.BULLISH:
+                if close < invalidation:
+                    return None
+                rejected = close > fvg.upper_bound
+            else:
+                if close > invalidation:
+                    return None
+                rejected = close < fvg.lower_bound
+            evidence_sources.append(source)
+            if rejected:
+                if core_v1_entry_session(item.timing.event_timestamp) is None:
+                    continue
+                sources = _unique_sources(evidence_sources)
+                timing = EvidenceTiming.from_inputs(
+                    event_timestamp=item.timing.event_timestamp,
+                    confirmation_timestamp=item.timing.event_timestamp,
+                    source_observations=sources,
+                    provenance={
+                        "resolver": "core-v1-e009-fvg-quarter-rejection",
+                        "trigger": "post-touch-close-beyond-far-edge-before-adverse-quarter-close",
+                        "fvg_quadrants": "lower=0; upper=1; boundaries=0.25,0.5,0.75",
+                        "adverse_close_threshold": "bullish_below_0.25_invalidates; bearish_above_0.75_invalidates",
+                        "threshold_equality": "remains_valid",
+                        "candidate_lifetime": "THREE_ELIGIBLE_ENTRY_WINDOWS_EXCLUSIVE_END",
+                        "candidate_expiry": expiry.isoformat(),
+                        "planned_price_source": "rejection-bar-close",
+                        "fill_status": "NOT_A_FILL",
+                    },
+                    base_bar_scoped=True,
+                )
+                return CoreV1PlannedEntry(
+                    subject=inputs.visible_inputs.subject,
+                    planned_entry_price=close,
+                    timing=timing,
+                )
+        return None
+
+
+def derive_visible_fvg_interaction(
+    inputs: SubjectVisibleInputs,
+    zone: CoreV1FVGObservation,
+    mss: CoreV1MSSResult,
+) -> CoreV1ZoneInteraction | None:
+    """Return the first visible post-MSS OHLC overlap with an FVG."""
+    if not isinstance(inputs, SubjectVisibleInputs):
+        raise TypeError("inputs must be SubjectVisibleInputs.")
+    if not isinstance(zone, CoreV1FVGObservation):
+        raise TypeError("zone must be a CoreV1FVGObservation.")
+    if (
+        not isinstance(mss, CoreV1MSSResult)
+        or mss.status is not MSSStatus.MSS
+        or mss.confirmation_timestamp is None
+        or not same_subject_id(mss.subject, inputs.subject)
+    ):
+        return None
+    _validate_visible_sources(zone.timing.source_observations, inputs, "FVG zone")
+
+    earliest_interaction = max(zone.timing.availability_timestamp, mss.confirmation_timestamp)
+    relevant = tuple(
+        item
+        for item in inputs.base_observations
+        if item.timing.event_timestamp > earliest_interaction
+    )
+    times = tuple(item.timing.event_timestamp for item in relevant)
+    if any(right <= left for left, right in zip(times, times[1:])):
+        return None
+
+    for item in relevant:
+        if not isinstance(item.value, Mapping) or len(item.timing.source_observations) != 1:
+            return None
+        source = item.timing.source_observations[0]
+        if (
+            not source.is_base_timeframe
+            or source.event_timestamp != item.timing.event_timestamp
+            or source.base_bar_timestamp != item.timing.event_timestamp
+        ):
+            return None
+        values = {str(key).lower(): value for key, value in item.value.items()}
+        if not {"open", "high", "low", "close"}.issubset(values):
+            return None
+        try:
+            open_, high, low, close = (
+                float(values[name]) for name in ("open", "high", "low", "close")
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(not isfinite(value) for value in (open_, high, low, close)):
+            return None
+        if high < max(open_, close, low) or low > min(open_, close, high):
+            return None
+        if low <= zone.fvg.upper_bound and high >= zone.fvg.lower_bound:
+            timing = EvidenceTiming.from_inputs(
+                event_timestamp=item.timing.event_timestamp,
+                source_observations=_unique_sources(
+                    (*zone.timing.source_observations, *item.timing.source_observations)
+                ),
+                provenance={
+                    "detector": "core-v1-visible-fvg-overlap",
+                    "interaction": "ohlc-range-overlap",
+                    "exact_touch_price_inferred": False,
+                },
+                base_bar_scoped=True,
+            )
+            return CoreV1ZoneInteraction(
+                subject=inputs.subject,
+                zone=zone,
+                timing=timing,
+                price=None,
+            )
+    return None
 
 
 def evaluate_core_v1_retracement(
@@ -814,6 +1040,7 @@ __all__ = [
     "CoreV1RetracementInputs",
     "CoreV1RetracementResult",
     "CoreV1ZoneInteraction",
+    "derive_visible_fvg_interaction",
     "ReactionaryZone",
     "RetracementEntryResolver",
     "evaluate_core_v1_retracement",

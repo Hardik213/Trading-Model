@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from .core_v1_dealing_range import (
     DealingRangeContext,
@@ -37,10 +37,12 @@ from .core_v1_reactionary_zones import (
 from .core_v1_retracement import (
     CoreV1RetracementResult,
     CoreV1ZoneInteraction,
+    FVGQuarterRejectionEntryResolver,
     ReactionaryZone,
     RetracementEntryResolver,
     evaluate_core_v1_retracement,
 )
+from .core_v1_sessions import core_v1_entry_session
 from .evidence_timing import (
     EvidenceSourceObservation,
     SubjectEvidence,
@@ -590,6 +592,26 @@ def evaluate_core_v1_pipeline(
             zone=zone,
             interaction=interaction,
             retracement=entry,
+        )
+
+    assert entry.planned_entry is not None
+    if (
+        isinstance(entry_resolver, FVGQuarterRejectionEntryResolver)
+        and core_v1_entry_session(entry.planned_entry.timing.event_timestamp) is None
+    ):
+        entry = replace(
+            entry,
+            state=PrecisionState.DEVELOPING,
+            reason="The planned-entry event is outside the configured ICT session windows or New York timezone data is unavailable.",
+            planned_entry=None,
+            provenance={**entry.provenance, "session_gate": ()},
+        )
+        return _incomplete(
+            inputs, context, entry.reason,
+            draw_on_liquidity=draw_on_liquidity,
+            opposing_liquidity_levels=opposing_liquidity_levels,
+            liquidity=liquidity, displacement=displacement, mss=mss,
+            zone=zone, interaction=interaction, retracement=entry,
         )
 
     hypothesis_result = evaluate_core_v1_hypothesis(
